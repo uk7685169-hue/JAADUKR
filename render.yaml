@@ -2,7 +2,6 @@ services:
   - type: web
     name: waifu-bot
     env: node
-    rootDir: src
     buildCommand: npm install
     startCommand: npm start
     envVars:
