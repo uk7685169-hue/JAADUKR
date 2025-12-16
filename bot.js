@@ -1,10 +1,14 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
-const { Pool } = require('pg');
+const mongoose = require('mongoose');
 const express = require('express');
 const fs = require('fs').promises;
 const path = require('path');
 const { saveAllData, saveBotData, saveWaifusData, saveUsersData } = require('./src/auto_save_data.js');
+const { connectDB } = require('./src/db');
+const User = require('./src/models/User');
+const Waifu = require('./src/models/Waifu');
+const Harem = require('./src/models/Harem');
 
 // Import guess bot module
 let guessBotModule = null;
@@ -35,13 +39,9 @@ const bot = new TelegramBot(token, {
     polling: false  // Never use polling on Render - always use webhooks
 });
 
-if (!process.env.DATABASE_URL) {
-    console.error('Error: DATABASE_URL not found in environment variables');
-    console.error('Please add DATABASE_URL in your deployment environment');
-    process.exit(1);
-}
+});
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+connectDB();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -158,7 +158,9 @@ app.get('/health', async (req, res) => {
         res.setHeader('Cache-Control', 'no-cache');
 
         // Check database connection
-        await pool.query('SELECT 1');
+        if (mongoose.connection.readyState !== 1) {
+            throw new Error('Database not connected');
+        }
 
         // Get webhook info
         let webhookInfo = null;
