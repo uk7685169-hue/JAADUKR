@@ -1,9 +1,10 @@
 require('dotenv').config();
-const { Pool } = require('pg');
+const mongoose = require('mongoose');
 const fs = require('fs').promises;
 const path = require('path');
-
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const User = require('./models/User');
+const Waifu = require('./models/Waifu');
+const Harem = require('./models/Harem');
 
 const DATA_DIR = './src/data_files';
 const BOT_DATA_FILE = path.join(DATA_DIR, 'bot_data.json');
@@ -30,15 +31,15 @@ async function saveBotData() {
                 upload_group_id: process.env.UPLOAD_GROUP_ID
             },
             statistics: {
-                total_users: (await pool.query('SELECT COUNT(*) FROM users')).rows[0].count,
-                total_waifus: (await pool.query('SELECT COUNT(*) FROM waifus')).rows[0].count,
-                total_harem_entries: (await pool.query('SELECT COUNT(*) FROM harem')).rows[0].count,
-                total_groups: (await pool.query('SELECT COUNT(*) FROM group_settings')).rows[0].count
+                total_users: await User.countDocuments(),
+                total_waifus: await Waifu.countDocuments(),
+                total_harem_entries: await Harem.countDocuments(),
+                total_groups: 0 // Not implemented in MongoDB yet
             },
             roles: {
-                developers: (await pool.query("SELECT u.user_id, u.username, u.first_name FROM users u JOIN roles r ON u.user_id = r.user_id WHERE r.role_type = 'dev'")).rows,
-                sudos: (await pool.query("SELECT u.user_id, u.username, u.first_name FROM users u JOIN roles r ON u.user_id = r.user_id WHERE r.role_type = 'sudo'")).rows,
-                uploaders: (await pool.query("SELECT u.user_id, u.username, u.first_name FROM users u JOIN roles r ON u.user_id = r.user_id WHERE r.role_type = 'uploader'")).rows
+                developers: [], // Not implemented
+                sudos: [],
+                uploaders: []
             }
         };
 
@@ -51,12 +52,12 @@ async function saveBotData() {
 
 async function saveWaifusData() {
     try {
-        const waifus = await pool.query('SELECT * FROM waifus ORDER BY waifu_id');
+        const waifus = await Waifu.find().sort({ waifu_id: 1 });
 
         const waifusData = {
             last_updated: new Date().toISOString(),
-            total_waifus: waifus.rows.length,
-            waifus: waifus.rows.map(w => ({
+            total_waifus: waifus.length,
+            waifus: waifus.map(w => ({
                 waifu_id: w.waifu_id,
                 name: w.name,
                 anime: w.anime,
@@ -72,11 +73,8 @@ async function saveWaifusData() {
         };
 
         for (let i = 0; i < waifusData.waifus.length; i++) {
-            const ownerCount = await pool.query(
-                'SELECT COUNT(DISTINCT user_id) FROM harem WHERE waifu_id = $1',
-                [waifusData.waifus[i].waifu_id]
-            );
-            waifusData.waifus[i].total_owners = parseInt(ownerCount.rows[0].count);
+            const ownerCount = await Harem.countDocuments({ waifu_id: waifusData.waifus[i].waifu_id });
+            waifusData.waifus[i].total_owners = ownerCount;
         }
 
         await fs.writeFile(WAIFUS_DATA_FILE, JSON.stringify(waifusData, null, 2));
@@ -88,29 +86,18 @@ async function saveWaifusData() {
 
 async function saveUsersData() {
     try {
-        const users = await pool.query('SELECT * FROM users ORDER BY user_id');
+        const users = await User.find().sort({ user_id: 1 });
 
         const usersData = {
             last_updated: new Date().toISOString(),
-            total_users: users.rows.length,
+            total_users: users.length,
             users: []
         };
 
-        for (const user of users.rows) {
-            const haremCount = await pool.query(
-                'SELECT COUNT(*) FROM harem WHERE user_id = $1',
-                [user.user_id]
-            );
+        for (const user of users) {
+            const haremCount = await Harem.countDocuments({ user_id: user.user_id });
 
-            const harem = await pool.query(
-                'SELECT w.waifu_id, w.name, w.anime, w.rarity FROM harem h JOIN waifus w ON h.waifu_id = w.waifu_id WHERE h.user_id = $1 ORDER BY h.owned_since DESC',
-                [user.user_id]
-            );
-
-            const roles = await pool.query(
-                'SELECT role_type FROM roles WHERE user_id = $1',
-                [user.user_id]
-            );
+            const harem = await Harem.find({ user_id: user.user_id }).populate('waifu_id').sort({ owned_since: -1 });
 
             usersData.users.push({
                 user_id: user.user_id,
@@ -118,21 +105,15 @@ async function saveUsersData() {
                 first_name: user.first_name,
                 berries: user.berries,
                 gems: user.gems,
-                crimson: user.crimson,
+                crimson: user.berries, // Assuming crimson is berries
                 daily_streak: user.daily_streak,
                 weekly_streak: user.weekly_streak,
                 last_daily_claim: user.last_daily_claim,
                 last_weekly_claim: user.last_weekly_claim,
                 favorite_waifu_id: user.favorite_waifu_id,
-                total_waifus: parseInt(haremCount.rows[0].count),
-                roles: roles.rows.map(r => r.role_type),
-                harem: harem.rows.map(w => ({
-                    waifu_id: w.waifu_id,
-                    name: w.name,
-                    anime: w.anime,
-                    rarity: w.rarity,
-                    rarity_name: getRarityName(w.rarity)
-                })),
+                total_waifus: haremCount,
+                roles: [], // Not implemented
+                harem: harem.map(h => h.waifu_id),
                 created_at: user.created_at
             });
         }
