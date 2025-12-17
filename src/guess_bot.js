@@ -14,8 +14,9 @@ const activeGuesses = new Map();
 if (GUESS_BOT_TOKEN) {
     guessBot = new TelegramBot(GUESS_BOT_TOKEN, { polling: false });
     
-    console.log('✅ Guess Bot initialized (webhook mode)');
+    console.log('✅ Guess Bot initialized (no polling)');
     console.log('🎮 Official Group ID:', OFFICIAL_GROUP);
+    setupGuessBotHandlers();
 } else {
     console.log('⚠️ Guess bot not initialized - missing GUESS_BOT_TOKEN');
 }
@@ -160,21 +161,11 @@ async function startGuessBotPolling() {
     if (!guessBot) return false;
     
     try {
-        await guessBot.deleteWebHook();
-        guessBot.startPolling({
-            polling: {
-                interval: 300,
-                autoStart: true,
-                params: {
-                    timeout: 10
-                }
-            }
-        });
         setupGuessBotHandlers();
-        console.log('✅ Guess Bot polling started');
+        console.log('✅ Guess Bot handlers registered');
         return true;
     } catch (error) {
-        console.error('❌ Guess Bot polling failed:', error.message);
+        console.error('❌ Guess Bot setup failed:', error.message);
         return false;
     }
 }
