@@ -127,193 +127,20 @@ app.get('/health', async (req, res) => {
 
 // CRITICAL: Initialize all database tables on startup
 async function initializeDatabase() {
+// Database initialization is handled by src/db.js
+// This is just a placeholder to maintain compatibility with existing code structure
+
+async function initializeDatabase() {
     try {
-        console.log('🔄 Initializing database tables...');
-        
-        // Users table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                username VARCHAR(255),
-                first_name VARCHAR(255),
-                berries INTEGER DEFAULT 50000,
-                gems INTEGER DEFAULT 0,
-                crimson INTEGER DEFAULT 0,
-                daily_streak INTEGER DEFAULT 0,
-                weekly_streak INTEGER DEFAULT 0,
-                last_daily_claim TIMESTAMP,
-                last_weekly_claim TIMESTAMP,
-                last_claim_date DATE,
-                favorite_waifu_id INTEGER,
-                harem_filter_rarity INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        
-        // Add crimson column if it doesn't exist (for existing databases)
-        await pool.query(`
-            DO $$ 
-            BEGIN 
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='crimson') THEN
-                    ALTER TABLE users ADD COLUMN crimson INTEGER DEFAULT 0;
-                END IF;
-            END $$;
-        `);
-        console.log('✅ Users table ready (with crimson column)');
-
-        // Waifus table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS waifus (
-                waifu_id SERIAL PRIMARY KEY,
-                name VARCHAR(255) NOT NULL,
-                anime VARCHAR(255) NOT NULL,
-                rarity INTEGER NOT NULL CHECK (rarity >= 1 AND rarity <= 16),
-                image_file_id TEXT,
-                price INTEGER DEFAULT 5000,
-                is_locked BOOLEAN DEFAULT FALSE,
-                uploaded_by BIGINT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ Waifus table ready');
-
-        // Harem table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS harem (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT REFERENCES users(user_id),
-                waifu_id INTEGER REFERENCES waifus(waifu_id),
-                acquired_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                owned_since TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ Harem table ready');
-
-        // Roles table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS roles (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT REFERENCES users(user_id),
-                role_type VARCHAR(50) NOT NULL,
-                UNIQUE (user_id, role_type)
-            )
-        `);
-        console.log('✅ Roles table ready');
-
-        // Group settings table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS group_settings (
-                group_id BIGINT PRIMARY KEY,
-                spawn_enabled BOOLEAN DEFAULT TRUE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ Group settings table ready');
-
-        // Spawn tracker table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS spawn_tracker (
-                group_id BIGINT PRIMARY KEY,
-                message_count INTEGER DEFAULT 0,
-                active_spawn_waifu_id INTEGER,
-                active_spawn_name VARCHAR(255),
-                bid_message_count INTEGER DEFAULT 0,
-                last_spawn TIMESTAMP
-            )
-        `);
-        console.log('✅ Spawn tracker table ready');
-
-        // Group bids table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS group_bids (
-                id SERIAL PRIMARY KEY,
-                group_id BIGINT,
-                waifu_id INTEGER REFERENCES waifus(waifu_id),
-                current_bid INTEGER DEFAULT 0,
-                current_bidder_id BIGINT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ Group bids table ready');
-
-        // Bazaar items table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS bazaar_items (
-                item_id SERIAL PRIMARY KEY,
-                waifu_id INTEGER REFERENCES waifus(waifu_id),
-                seller_id BIGINT REFERENCES users(user_id),
-                price INTEGER NOT NULL,
-                status VARCHAR(20) DEFAULT 'active',
-                listed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ Bazaar items table ready');
-
-        // Cooldowns table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS cooldowns (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                command VARCHAR(50),
-                last_used TIMESTAMP,
-                UNIQUE (user_id, command)
-            )
-        `);
-        console.log('✅ Cooldowns table ready');
-
-        // Spam blocks table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS spam_blocks (
-                user_id BIGINT PRIMARY KEY,
-                blocked_until TIMESTAMP
-            )
-        `);
-        console.log('✅ Spam blocks table ready');
-
-        // Banned users table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS banned_users (
-                user_id BIGINT PRIMARY KEY,
-                banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                reason TEXT
-            )
-        `);
-        console.log('✅ Banned users table ready');
-
-        // Bot settings table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS bot_settings (
-                key VARCHAR(100) PRIMARY KEY,
-                value TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ Bot settings table ready');
-
-        console.log('✅ All database tables initialized successfully!');
+        console.log('✅ SQLite database already initialized by src/db.js');
     } catch (error) {
         console.error('❌ Database initialization error:', error);
-        // Don't exit - continue with partial initialization
     }
 }
 
 // CRITICAL: Clear spawn_tracker on bot startup to prevent race conditions
 async function initializeSpawnTracker() {
     try {
-        // Create redeem_codes table if not exists
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS redeem_codes (
-                code TEXT PRIMARY KEY,
-                code_type TEXT NOT NULL,
-                amount BIGINT,
-                waifu_id INT,
-                max_uses INT DEFAULT 1,
-                uses INT DEFAULT 0,
-                created_at TIMESTAMP DEFAULT datetime('now')
-            )
-        `);
-        console.log('✅ Redeem codes table ready');
-        
         await pool.query('DELETE FROM spawn_tracker WHERE message_count >= 100 OR active_spawn_waifu_id IS NOT NULL');
         console.log('✅ Spawn tracker cleared on startup');
     } catch (error) {
@@ -602,12 +429,12 @@ async function checkBanned(userId) {
 
 async function checkSpamBlock(userId) {
     try {
-        const result = await pool.query('SELECT * FROM spam_blocks WHERE user_id = $1 AND blocked_until > datetime('now')', [userId]).catch(() => ({ rows: [] }));
+        const result = await pool.query('SELECT * FROM spam_blocks WHERE user_id = $1 AND blocked_until > datetime("now")', [userId]).catch(() => ({ rows: [] }));
         if (result.rows.length > 0) {
             return result.rows[0].blocked_until;
         }
 
-        await pool.query('DELETE FROM spam_blocks WHERE user_id = $1 AND blocked_until <= datetime('now')', [userId]).catch(console.error);
+        await pool.query('DELETE FROM spam_blocks WHERE user_id = $1 AND blocked_until <= datetime("now")', [userId]).catch(console.error);
         return null;
     } catch (error) {
         return null;
@@ -678,11 +505,11 @@ async function checkCooldown(userId, command, cooldownSeconds) {
         
         try {
             await pool.query(
-                'INSERT INTO cooldowns (user_id, command, last_used) VALUES ($1, $2, datetime('now')) ON CONFLICT (user_id, command) DO UPDATE SET last_used = datetime('now')',
+                'INSERT INTO cooldowns (user_id, command, last_used) VALUES ($1, $2, datetime("now")) ON CONFLICT (user_id, command) DO UPDATE SET last_used = datetime("now")',
                 [userId, command]
             ).catch(async (dbErr) => {
                 await pool.query('DELETE FROM cooldowns WHERE user_id = $1 AND command = $2', [userId, command]).catch(() => {});
-                await pool.query('INSERT INTO cooldowns (user_id, command, last_used) VALUES ($1, $2, datetime('now'))', [userId, command]).catch(() => {});
+                await pool.query('INSERT INTO cooldowns (user_id, command, last_used) VALUES ($1, $2, datetime("now"))', [userId, command]).catch(() => {});
             });
         } catch (e) {
             console.error('[checkCooldown] DB error (non-fatal):', e?.message || e);
@@ -1252,7 +1079,7 @@ bot.onText(/\/daily/, async (msg) => {
     const streak = (!lastDaily || (now - lastDaily) / (1000 * 60 * 60 * 48) < 1) ? user.daily_streak + 1 : 1;
     let dailyReward = 50000;
 
-    await pool.query('UPDATE users SET berries = berries + $1, daily_streak = $2, last_daily_claim = datetime('now') WHERE user_id = $3', 
+    await pool.query('UPDATE users SET berries = berries + $1, daily_streak = $2, last_daily_claim = datetime("now") WHERE user_id = $3', 
         [dailyReward, streak, userId]);
     await saveUserDataToFile(userId);
 
@@ -1277,7 +1104,7 @@ bot.onText(/\/weekly/, async (msg) => {
     const streak = (!lastWeekly || (now - lastWeekly) / (1000 * 60 * 60 * 24 * 14) < 1) ? user.weekly_streak + 1 : 1;
     let weeklyReward = 3000000;
 
-    await pool.query('UPDATE users SET berries = berries + $1, weekly_streak = $2, last_weekly_claim = datetime('now') WHERE user_id = $3', 
+    await pool.query('UPDATE users SET berries = berries + $1, weekly_streak = $2, last_weekly_claim = datetime("now") WHERE user_id = $3', 
         [weeklyReward, streak, userId]);
     await saveUserDataToFile(userId);
 
@@ -2821,7 +2648,7 @@ bot.onText(/\/uploaddp/, async (msg) => {
                 file_id TEXT NOT NULL,
                 media_type TEXT NOT NULL,
                 uploaded_by BIGINT,
-                created_at TIMESTAMP DEFAULT datetime('now')
+                created_at TIMESTAMP DEFAULT datetime("now")
             )
         `);
 
@@ -4308,7 +4135,7 @@ bot.onText(/\/goal(?:\s+(.+))?/, async (msg, match) => {
             CREATE TABLE IF NOT EXISTS user_goals (
                 user_id BIGINT PRIMARY KEY,
                 description TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT datetime('now')
+                created_at TIMESTAMP DEFAULT datetime("now")
             )
         `);
 
@@ -4589,7 +4416,7 @@ bot.onText(/\/treasure/, async (msg) => {
                 user_id BIGINT PRIMARY KEY,
                 winning_position INT NOT NULL,
                 gems_amount INT NOT NULL DEFAULT 1,
-                created_at TIMESTAMP DEFAULT datetime('now')
+                created_at TIMESTAMP DEFAULT datetime("now")
             )
         `);
 
@@ -4870,7 +4697,7 @@ bot.onText(/\/addreward\s+\/(\w+)\s+[Gg]ive\s+(.+)/i, async (msg, match) => {
                 waifu_id INT,
                 created_by BIGINT NOT NULL,
                 expires_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT datetime('now')
+                created_at TIMESTAMP DEFAULT datetime("now")
             )
         `);
 
