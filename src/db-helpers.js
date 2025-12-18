@@ -1,59 +1,61 @@
-// SQLite helper functions to replace pool.query
-// Usage: instead of await pool.query(...), use db.prepare(...).run/get/all()
-
 const { db } = require('./db');
 
-// Convert PostgreSQL parameterized query to SQLite
-// PostgreSQL: $1, $2, $3 => SQLite: ?, ?, ?
-function convertQuery(pgQuery) {
-    return pgQuery.replace(/\$\d+/g, '?');
+// Create a compatibility layer that makes better-sqlite3 (sync) behave like node-postgres (async)
+// This allows existing code that uses pool.query() to work with SQLite
+
+function createCompatPool() {
+    return {
+        query: function(sql, params = []) {
+            return new Promise((resolve, reject) => {
+                try {
+                    // Convert PostgreSQL $1, $2, etc to ?
+                    const convertedSql = sql.replace(/\$\d+/g, '?');
+                    
+                    // Determine query type
+                    const trimmed = convertedSql.trim().toUpperCase();
+                    const isSelect = trimmed.startsWith('SELECT');
+                    
+                    if (isSelect) {
+                        // Check if it's a single-row query with RETURNING
+                        if (convertedSql.toUpperCase().includes('RETURNING')) {
+                            const result = db.prepare(convertedSql).get(...params);
+                            resolve({
+                                rows: result ? [result] : [],
+                                rowCount: result ? 1 : 0
+                            });
+                        } else {
+                            // Regular SELECT - return all rows
+                            const results = db.prepare(convertedSql).all(...params);
+                            resolve({
+                                rows: results || [],
+                                rowCount: (results || []).length
+                            });
+                        }
+                    } else {
+                        // INSERT/UPDATE/DELETE/other
+                        const stmt = db.prepare(convertedSql);
+                        const info = stmt.run(...params);
+                        resolve({
+                            rows: [],
+                            rowCount: info.changes || 0,
+                            lastID: info.lastInsertRowid
+                        });
+                    }
+                } catch (error) {
+                    console.error('DB Error:', error.message);
+                    reject(error);
+                }
+            });
+        }
+    };
 }
 
-// Convert PostgreSQL RETURNING clause (not supported in SQLite directly)
-// For INSERT/UPDATE/DELETE, use last_insert_rowid() or read back
+// Create singleton pool instance
+const pool = createCompatPool();
 
-function exec(sql, params = []) {
-    try {
-        const query = convertQuery(sql);
-        const stmt = db.prepare(query);
-        const result = stmt.run(...params);
-        return {
-            rows: [{ affectedRows: result.changes }]
-        };
-    } catch (error) {
-        console.error('DB exec error:', error, 'SQL:', sql);
-        return { rows: [] };
-    }
-}
-
-function query(sql, params = []) {
-    try {
-        const query = convertQuery(sql);
-        const stmt = db.prepare(query);
-        const rows = stmt.all(...params);
-        return { rows };
-    } catch (error) {
-        console.error('DB query error:', error, 'SQL:', sql);
-        return { rows: [] };
-    }
-}
-
-function queryOne(sql, params = []) {
-    try {
-        const query = convertQuery(sql);
-        const stmt = db.prepare(query);
-        const row = stmt.get(...params);
-        return { rows: row ? [row] : [] };
-    } catch (error) {
-        console.error('DB queryOne error:', error, 'SQL:', sql);
-        return { rows: [] };
-    }
-}
-
+// Export both pool (for compatibility) and db (for direct SQLite access)
 module.exports = {
-    exec,
-    query,
-    queryOne,
+    pool,
     db,
-    convertQuery
+    createCompatPool
 };

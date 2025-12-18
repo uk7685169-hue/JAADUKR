@@ -3,7 +3,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
 const fs = require('fs').promises;
 const path = require('path');
-const { db } = require('./src/db.js');
+const { db, pool } = require('./src/db-helpers.js');
 
 // Import guess bot module
 let guessBotModule = null;
@@ -54,8 +54,9 @@ bot.on = (event, handler) => _origOn(event, _wrapHandler(handler));
 const _origOnText = bot.onText.bind(bot);
 bot.onText = (regex, handler) => _origOnText(regex, _wrapHandler(handler));
 
-// JSON persistence - SQLite is now the primary database
-console.log('✅ SQLite database initialized');
+// SQLite database initialized via db-helpers.js and db.js
+console.log('✅ SQLite database ready (pool compatibility layer active)');
+
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -71,18 +72,31 @@ app.get('/health', async (req, res) => {
         res.setHeader('Cache-Control', 'no-cache');
 
         // Check database connection
+        await pool.query('SELECT 1');
+
+        // Get webhook info
+        let webhookInfo = null;
         try {
-            const result = db.prepare('SELECT 1').get();
+            webhookInfo = await bot.getWebHookInfo();
         } catch (e) {
-            console.error('Database check error:', e.message);
+            console.error('Webhook info error:', e.message);
         }
 
         res.json({
             status: 'online',
             uptime: process.uptime(),
             timestamp: new Date().toISOString(),
-            database: 'SQLite',
-            bot_status: 'polling'
+            database: 'connected',
+            webhook: {
+                url: webhookInfo?.url || null,
+                pending_updates: webhookInfo?.pending_update_count || 0
+            },
+            environment: {
+                node_env: process.env.NODE_ENV,
+                use_webhook: process.env.USE_WEBHOOK,
+                webhook_url: process.env.WEBHOOK_URL ? 'set' : 'not set',
+                bot_token: process.env.TELEGRAM_BOT_TOKEN ? 'set' : 'not set'
+            }
         });
     } catch (error) {
         res.status(500).json({
@@ -98,19 +112,191 @@ async function initializeDatabase() {
     try {
         console.log('🔄 Initializing database tables...');
         
-// CRITICAL: Initialize SQLite database on startup
-async function initializeDatabase() {
-    try {
-        console.log('✅ SQLite database already initialized by src/db.js');
+        // Users table
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username VARCHAR(255),
+                first_name VARCHAR(255),
+                berries INTEGER DEFAULT 50000,
+                gems INTEGER DEFAULT 0,
+                crimson INTEGER DEFAULT 0,
+                daily_streak INTEGER DEFAULT 0,
+                weekly_streak INTEGER DEFAULT 0,
+                last_daily_claim TIMESTAMP,
+                last_weekly_claim TIMESTAMP,
+                last_claim_date DATE,
+                favorite_waifu_id INTEGER,
+                harem_filter_rarity INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        
+        // Add crimson column if it doesn't exist (for existing databases)
+        await pool.query(`
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='crimson') THEN
+                    ALTER TABLE users ADD COLUMN crimson INTEGER DEFAULT 0;
+                END IF;
+            END $$;
+        `);
+        console.log('✅ Users table ready (with crimson column)');
+
+        // Waifus table
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS waifus (
+                waifu_id SERIAL PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                anime VARCHAR(255) NOT NULL,
+                rarity INTEGER NOT NULL CHECK (rarity >= 1 AND rarity <= 16),
+                image_file_id TEXT,
+                price INTEGER DEFAULT 5000,
+                is_locked BOOLEAN DEFAULT FALSE,
+                uploaded_by BIGINT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ Waifus table ready');
+
+        // Harem table
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS harem (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(user_id),
+                waifu_id INTEGER REFERENCES waifus(waifu_id),
+                acquired_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                owned_since TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ Harem table ready');
+
+        // Roles table
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS roles (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(user_id),
+                role_type VARCHAR(50) NOT NULL,
+                UNIQUE (user_id, role_type)
+            )
+        `);
+        console.log('✅ Roles table ready');
+
+        // Group settings table
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS group_settings (
+                group_id BIGINT PRIMARY KEY,
+                spawn_enabled BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ Group settings table ready');
+
+        // Spawn tracker table
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS spawn_tracker (
+                group_id BIGINT PRIMARY KEY,
+                message_count INTEGER DEFAULT 0,
+                active_spawn_waifu_id INTEGER,
+                active_spawn_name VARCHAR(255),
+                bid_message_count INTEGER DEFAULT 0,
+                last_spawn TIMESTAMP
+            )
+        `);
+        console.log('✅ Spawn tracker table ready');
+
+        // Group bids table
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS group_bids (
+                id SERIAL PRIMARY KEY,
+                group_id BIGINT,
+                waifu_id INTEGER REFERENCES waifus(waifu_id),
+                current_bid INTEGER DEFAULT 0,
+                current_bidder_id BIGINT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ Group bids table ready');
+
+        // Bazaar items table
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS bazaar_items (
+                item_id SERIAL PRIMARY KEY,
+                waifu_id INTEGER REFERENCES waifus(waifu_id),
+                seller_id BIGINT REFERENCES users(user_id),
+                price INTEGER NOT NULL,
+                status VARCHAR(20) DEFAULT 'active',
+                listed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ Bazaar items table ready');
+
+        // Cooldowns table
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS cooldowns (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                command VARCHAR(50),
+                last_used TIMESTAMP,
+                UNIQUE (user_id, command)
+            )
+        `);
+        console.log('✅ Cooldowns table ready');
+
+        // Spam blocks table
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS spam_blocks (
+                user_id BIGINT PRIMARY KEY,
+                blocked_until TIMESTAMP
+            )
+        `);
+        console.log('✅ Spam blocks table ready');
+
+        // Banned users table
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS banned_users (
+                user_id BIGINT PRIMARY KEY,
+                banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                reason TEXT
+            )
+        `);
+        console.log('✅ Banned users table ready');
+
+        // Bot settings table
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                key VARCHAR(100) PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ Bot settings table ready');
+
+        console.log('✅ All database tables initialized successfully!');
     } catch (error) {
         console.error('❌ Database initialization error:', error);
+        // Don't exit - continue with partial initialization
     }
 }
 
 // CRITICAL: Clear spawn_tracker on bot startup to prevent race conditions
 async function initializeSpawnTracker() {
     try {
-        db.prepare('DELETE FROM spawn_tracker WHERE message_count >= 100 OR active_spawn_waifu_id IS NOT NULL').run();
+        // Create redeem_codes table if not exists
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS redeem_codes (
+                code TEXT PRIMARY KEY,
+                code_type TEXT NOT NULL,
+                amount BIGINT,
+                waifu_id INT,
+                max_uses INT DEFAULT 1,
+                uses INT DEFAULT 0,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        `);
+        console.log('✅ Redeem codes table ready');
+        
+        await pool.query('DELETE FROM spawn_tracker WHERE message_count >= 100 OR active_spawn_waifu_id IS NOT NULL');
         console.log('✅ Spawn tracker cleared on startup');
     } catch (error) {
         console.error('Error initializing spawn tracker:', error);
@@ -118,6 +304,7 @@ async function initializeSpawnTracker() {
 }
 
 // Run initialization before server starts
+// Wrap in async to ensure database errors don't crash the process
 (async () => {
     try {
         await initializeDatabase();
