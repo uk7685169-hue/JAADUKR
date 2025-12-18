@@ -35,13 +35,40 @@ const bot = new TelegramBot(token, {
     polling: false  // Never use polling on Render - always use webhooks
 });
 
-if (!process.env.DATABASE_URL) {
-    console.error('Error: DATABASE_URL not found in environment variables');
-    console.error('Please add DATABASE_URL in your deployment environment');
-    process.exit(1);
+// Wrap handler registration so async errors inside handlers don't crash the process
+function _wrapHandler(fn) {
+    return function wrapped(...args) {
+        try {
+            const res = fn(...args);
+            if (res && typeof res.then === 'function') {
+                res.catch(err => {
+                    console.error('Async handler error:', err && err.message ? err.message : err);
+                });
+            }
+        } catch (err) {
+            console.error('Handler threw synchronously:', err && err.message ? err.message : err);
+        }
+    };
 }
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const _origOn = bot.on.bind(bot);
+bot.on = (event, handler) => _origOn(event, _wrapHandler(handler));
+const _origOnText = bot.onText.bind(bot);
+bot.onText = (regex, handler) => _origOnText(regex, _wrapHandler(handler));
+
+// Make Postgres optional so bot can run without it. Provide a safe stub when missing.
+let pool = null;
+if (process.env.DATABASE_URL) {
+    try {
+        pool = new Pool({ connectionString: process.env.DATABASE_URL });
+    } catch (err) {
+        console.error('Error creating Postgres pool:', err && err.message ? err.message : err);
+        pool = { query: async () => ({ rows: [] }), on: () => {} };
+    }
+} else {
+    console.warn('DATABASE_URL not set — running without Postgres. Using safe stub.');
+    pool = { query: async () => ({ rows: [] }), on: () => {} };
+}
 
 const app = express();
 const PORT = process.env.PORT || 5000;

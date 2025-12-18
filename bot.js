@@ -34,15 +34,41 @@ if (!token) {
 const bot = new TelegramBot(token, {
     polling: false  // Never use polling on Render - always use webhooks
 });
+// Wrap handler registration so async errors inside handlers don't crash the process
+function _wrapHandler(fn) {
+    return function wrapped(...args) {
+        try {
+            const res = fn(...args);
+            if (res && typeof res.then === 'function') {
+                res.catch(err => {
+                    console.error('Async handler error:', err && err.message ? err.message : err);
+                });
+            }
+        } catch (err) {
+            console.error('Handler threw synchronously:', err && err.message ? err.message : err);
+        }
+    };
+}
 
-// JSON persistence - no database needed
-// const pool = getPool();
+const _origOn = bot.on.bind(bot);
+bot.on = (event, handler) => _origOn(event, _wrapHandler(handler));
+const _origOnText = bot.onText.bind(bot);
+bot.onText = (regex, handler) => _origOnText(regex, _wrapHandler(handler));
 
-// if (!pool) {
-//     console.error('Error: Database connection failed');
-//     console.error('Please check DATABASE_URL environment variable');
-//     process.exit(1);
-// }
+// JSON persistence - try to use getPool(), but fall back to a safe stub so bot won't crash
+let pool = null;
+try {
+    const maybePool = getPool && getPool();
+    if (maybePool) {
+        pool = maybePool;
+    }
+} catch (e) {
+    console.warn('getPool() failed:', e && e.message ? e.message : e);
+}
+if (!pool) {
+    console.warn('Postgres pool not available — running with safe stub.');
+    pool = { query: async () => ({ rows: [] }), on: () => {} };
+}
 
 const app = express();
 const PORT = process.env.PORT || 5000;
