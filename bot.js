@@ -16,7 +16,7 @@ try {
 }
 
 // Try multiple token sources for compatibility
-const token = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN || process.env.BOT_TOKEN_1;
+const token = process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN_1;
 const channelId = process.env.CHANNEL_ID || process.env.DATABASE_CHANNEL_ID;
 const uploadGroupId = process.env.UPLOAD_GROUP_ID || '-1002503593313';
 const uploadNotificationGroup = '-1002503593313';
@@ -24,15 +24,15 @@ const OWNER_ID = parseInt(process.env.OWNER_ID || process.env.DEVELOPER_ID) || 6
 
 if (!token) {
     console.error('Error: Bot token not found in environment variables');
-    console.error('Please add one of these secrets in Replit:');
-    console.error('- TELEGRAM_BOT_TOKEN');
+    console.error('Please add one of these secrets:');
     console.error('- BOT_TOKEN');
+    console.error('- TELEGRAM_BOT_TOKEN');
     console.error('- BOT_TOKEN_1');
-    process.exit(1);
+    // DO NOT EXIT - let Railway keep trying
 }
 
 const bot = new TelegramBot(token, {
-    polling: false  // Never use polling on Render - always use webhooks
+    polling: true
 });
 // Wrap handler registration so async errors inside handlers don't crash the process
 function _wrapHandler(fn) {
@@ -73,111 +73,10 @@ if (!pool) {
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Webhook endpoint for Render deployment
-app.post('/webhook', express.json(), (req, res) => {
-    try {
-        console.log('📨 Webhook received:', req.body);
-        bot.processUpdate(req.body);
-        res.sendStatus(200);
-        console.log('✅ Webhook processed successfully');
-    } catch (error) {
-        console.error('❌ Webhook processing error:', error);
-        res.sendStatus(500);
-    }
-});
-
-// Set webhook on startup with retry logic
-async function setupWebhook(retryCount = 0) {
-    const maxRetries = 3;
-
-    if (process.env.WEBHOOK_URL) {
-        try {
-            const webhookUrl = process.env.WEBHOOK_URL + '/webhook';
-            console.log(`🔄 Setting webhook to: ${webhookUrl} (attempt ${retryCount + 1}/${maxRetries + 1})`);
-
-            const result = await bot.setWebHook(webhookUrl, {
-                max_connections: 100,
-                allowed_updates: ["message", "callback_query", "inline_query"]
-            });
-            console.log('✅ Webhook setup result:', result);
-
-            // Verify webhook is set
-            const webhookInfo = await bot.getWebHookInfo();
-            console.log('📋 Webhook info:', webhookInfo);
-
-            if (webhookInfo.url === webhookUrl) {
-                console.log('🎉 Webhook successfully configured!');
-                return true;
-            } else {
-                console.error('⚠️ Webhook URL mismatch:', webhookInfo.url, 'vs expected:', webhookUrl);
-                throw new Error('Webhook URL mismatch');
-            }
-        } catch (error) {
-            console.error('❌ Webhook setup failed:', error.message);
-
-            if (retryCount < maxRetries) {
-                console.log(`🔄 Retrying webhook setup in ${5 * (retryCount + 1)} seconds...`);
-                setTimeout(() => setupWebhook(retryCount + 1), 5000 * (retryCount + 1));
-                return false;
-            } else {
-                console.error('❌ Max retries reached. Webhook mode only - no polling fallback to prevent duplicate messages.');
-                return false;
-            }
-        }
-    } else {
-        console.log('⚠️ No WEBHOOK_URL provided, using polling mode for local development');
-        try {
-            // Delete any existing webhook first to prevent conflicts
-            await bot.deleteWebHook();
-            bot.startPolling({
-                polling: {
-                    interval: 300,
-                    autoStart: true,
-                    params: {
-                        timeout: 10
-                    }
-                }
-            });
-            console.log('✅ Polling mode started successfully');
-        } catch (pollError) {
-            console.error('❌ Polling start failed:', pollError.message);
-        }
-        return true;
-    }
-}
+// Polling mode is set in bot initialization - no webhook
 
 app.get('/', (req, res) => {
-    res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Waifu Bot Status</title>
-            <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-            <meta http-equiv="Pragma" content="no-cache">
-            <meta http-equiv="Expires" content="0">
-            <style>
-                body { font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
-                .status { background: #4CAF50; color: white; padding: 20px; border-radius: 10px; text-align: center; }
-                .info { background: #f5f5f5; padding: 20px; margin-top: 20px; border-radius: 10px; }
-                h1 { margin: 0; }
-                p { margin: 10px 0; }
-            </style>
-        </head>
-        <body>
-            <div class="status">
-                <h1>✅ Waifu Bot is Running!</h1>
-                <p>Last checked: ${new Date().toLocaleString()}</p>
-            </div>
-            <div class="info">
-                <h2>🤖 Bot Information</h2>
-                <p><strong>Status:</strong> Online and Active</p>
-                <p><strong>Platform:</strong> Telegram</p>
-                <p><strong>Uptime:</strong> ${Math.floor(process.uptime())} seconds</p>
-                <p><strong>Server:</strong> Replit</p>
-            </div>
-        </body>
-        </html>
-    `);
+    res.send('Bot is running');
 });
 
 app.get('/health', async (req, res) => {
@@ -417,34 +316,38 @@ async function initializeSpawnTracker() {
 }
 
 // Run initialization before server starts
-initializeDatabase().then(() => {
-    return initializeSpawnTracker();
-}).then(() => {
-    console.log('✅ Database initialization complete');
-    // Setup webhook after database is ready
-    return setupWebhook();
-}).then(() => {
-    console.log('✅ Main bot webhook setup complete');
+// Wrap in async to ensure database errors don't crash the process
+(async () => {
+    try {
+        await initializeDatabase();
+        await initializeSpawnTracker();
+        console.log('✅ Database initialization complete');
+    } catch (error) {
+        console.error('⚠️ Database init failed (non-fatal):', error?.message || error);
+    }
     
     // Start guess bot after main bot is ready (only if it is a separate bot token)
-    if (guessBotModule && guessBotModule.startGuessBotPolling && !guessBotModule.usesMainToken) {
-        return guessBotModule.startGuessBotPolling();
+    try {
+        if (guessBotModule && guessBotModule.startGuessBotPolling && !guessBotModule.usesMainToken) {
+            await guessBotModule.startGuessBotPolling();
+        }
+    } catch (error) {
+        console.error('⚠️ Guess bot init failed (non-fatal):', error?.message || error);
     }
-    return true;
-}).then(() => {
+    
     console.log('✅ All bots initialized successfully');
-}).catch((error) => {
-    console.error('❌ Initialization error:', error);
+})().catch((error) => {
+    console.error('⚠️ Initialization chain failed (non-fatal):', error?.message || error);
+    // DO NOT EXIT - Railway needs the service to stay alive
 });
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🌐 Web server running on port ${PORT}`);
-    console.log(`✅ Bot is ready for deployment`);
-    console.log(`🔗 Webhook endpoint: /webhook`);
+    console.log(`✅ Bot is ready on Railway`);
 }).on('error', (err) => {
     console.error('Server error:', err);
     if (err.code === 'EADDRINUSE') {
-        console.error(`Port ${PORT} is already in use. Trying alternative port...`);
+        console.error(`Port ${PORT} is already in use. Trying port 0...`);
         app.listen(0, '0.0.0.0', () => {
             console.log(`🌐 Web server running on alternative port`);
         });
@@ -453,26 +356,12 @@ app.listen(PORT, '0.0.0.0', () => {
 
 bot.on('polling_error', (error) => {
     console.error('❌ Polling error:', error);
-    if (error.code === 'ETELEGRAM') {
-        console.error('🔄 Telegram API error - bot will attempt to reconnect');
-    }
-});
-
-bot.on('webhook_error', (error) => {
-    console.error('❌ Webhook error:', error);
-    console.log('🔄 Attempting to reconfigure webhook...');
-
-    // Wait a bit then try to reconfigure webhook
-    setTimeout(() => {
-        setupWebhook(0);
-    }, 5000);
+    // Continue running - do not exit
 });
 
 bot.on('error', (error) => {
     console.error('❌ Bot error:', error);
-    if (error.code === 'ETELEGRAM') {
-        console.log('🔄 Telegram API error detected, checking connection...');
-    }
+    // Continue running - do not exit
 });
 
 // Log incoming messages for debugging
@@ -493,11 +382,13 @@ process.on('uncaughtException', (error) => {
     // DO NOT EXIT - keep running forever
 });
 
-// ADDITIONAL SAFETY: catch pool errors
-pool.on('error', (err, client) => {
-    console.error('❌ [POOL ERROR]', err.message);
-    // Keep running
-});
+// ADDITIONAL SAFETY: catch pool errors - but do not crash
+if (pool && pool.on) {
+    pool.on('error', (err, client) => {
+        console.error('❌ [POOL ERROR]', err?.message || err);
+        // Keep running
+    });
+}
 
 const USER_DATA_DIR = './users';
 
@@ -517,10 +408,10 @@ async function backupAllData() {
     try {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
 
-        const users = await pool.query('SELECT * FROM users');
-        const waifus = await pool.query('SELECT * FROM waifus');
-        const harem = await pool.query('SELECT * FROM harem');
-        const roles = await pool.query('SELECT * FROM roles');
+        const users = await pool.query('SELECT * FROM users').catch(() => ({ rows: [] }));
+        const waifus = await pool.query('SELECT * FROM waifus').catch(() => ({ rows: [] }));
+        const harem = await pool.query('SELECT * FROM harem').catch(() => ({ rows: [] }));
+        const roles = await pool.query('SELECT * FROM roles').catch(() => ({ rows: [] }));
 
         const backupData = {
             timestamp: new Date().toISOString(),
@@ -618,10 +509,10 @@ ensureUserDataDir();
 
 async function saveUserDataToFile(userId) {
     try {
-        const user = await pool.query('SELECT * FROM users WHERE user_id = $1', [userId]);
+        const user = await pool.query('SELECT * FROM users WHERE user_id = $1', [userId]).catch(() => ({ rows: [] }));
         if (user.rows.length === 0) return;
 
-        const harem = await pool.query('SELECT waifu_id FROM harem WHERE user_id = $1', [userId]);
+        const harem = await pool.query('SELECT waifu_id FROM harem WHERE user_id = $1', [userId]).catch(() => ({ rows: [] }));
 
         const userData = {
             user_id: userId,
@@ -649,15 +540,15 @@ async function checkMonthlyReset() {
     try {
         const now = new Date();
         if (now.getDate() === 1) {
-            const lastReset = await pool.query('SELECT value FROM bot_settings WHERE key = $1', ['last_monthly_reset']);
+            const lastReset = await pool.query('SELECT value FROM bot_settings WHERE key = $1', ['last_monthly_reset']).catch(() => ({ rows: [] }));
             const lastResetMonth = lastReset.rows.length > 0 ? new Date(lastReset.rows[0].value).getMonth() : -1;
 
             if (lastResetMonth !== now.getMonth()) {
-                await pool.query('UPDATE users SET daily_streak = 0, weekly_streak = 0');
+                await pool.query('UPDATE users SET daily_streak = 0, weekly_streak = 0').catch(console.error);
                 await pool.query(
                     'INSERT INTO bot_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2',
                     ['last_monthly_reset', now.toISOString()]
-                );
+                ).catch(console.error);
                 console.log('✅ Monthly streak reset completed');
             }
         }
@@ -670,36 +561,49 @@ setInterval(checkMonthlyReset, 60 * 60 * 1000);
 checkMonthlyReset();
 
 async function ensureUser(userId, username, firstName) {
-    // Ensure gems column exists
-    await pool.query(`
-        DO $$ BEGIN
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='gems') THEN
-                ALTER TABLE users ADD COLUMN gems INT DEFAULT 0;
-            END IF;
-        END $$;
-    `).catch(() => {});
-    
-    const result = await pool.query(
-        'INSERT INTO users (user_id, username, first_name) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO UPDATE SET username = $2, first_name = $3 RETURNING *',
-        [userId, username, firstName]
-    );
-    await saveUserDataToFile(userId);
-    return result.rows[0];
+    try {
+        // Ensure gems column exists
+        await pool.query(`
+            DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='gems') THEN
+                    ALTER TABLE users ADD COLUMN gems INT DEFAULT 0;
+                END IF;
+            END $$;
+        `).catch(() => {});
+        
+        const result = await pool.query(
+            'INSERT INTO users (user_id, username, first_name) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO UPDATE SET username = $2, first_name = $3 RETURNING *',
+            [userId, username, firstName]
+        ).catch(() => ({ rows: [{ user_id: userId, username, first_name: firstName, berries: 50000 }] }));
+        await saveUserDataToFile(userId);
+        return result.rows[0];
+    } catch (error) {
+        console.error('ensureUser error:', error?.message || error);
+        return { user_id: userId, username, first_name: firstName, berries: 50000 };
+    }
 }
 
 async function checkBanned(userId) {
-    const result = await pool.query('SELECT * FROM banned_users WHERE user_id = $1', [userId]);
-    return result.rows.length > 0;
+    try {
+        const result = await pool.query('SELECT * FROM banned_users WHERE user_id = $1', [userId]).catch(() => ({ rows: [] }));
+        return result.rows.length > 0;
+    } catch (error) {
+        return false;
+    }
 }
 
 async function checkSpamBlock(userId) {
-    const result = await pool.query('SELECT * FROM spam_blocks WHERE user_id = $1 AND blocked_until > NOW()', [userId]);
-    if (result.rows.length > 0) {
-        return result.rows[0].blocked_until;
-    }
+    try {
+        const result = await pool.query('SELECT * FROM spam_blocks WHERE user_id = $1 AND blocked_until > NOW()', [userId]).catch(() => ({ rows: [] }));
+        if (result.rows.length > 0) {
+            return result.rows[0].blocked_until;
+        }
 
-    await pool.query('DELETE FROM spam_blocks WHERE user_id = $1 AND blocked_until <= NOW()', [userId]);
-    return null;
+        await pool.query('DELETE FROM spam_blocks WHERE user_id = $1 AND blocked_until <= NOW()', [userId]).catch(console.error);
+        return null;
+    } catch (error) {
+        return null;
+    }
 }
 
 async function trackSpam(userId) {
@@ -744,13 +648,17 @@ async function trackSpam(userId) {
 }
 
 async function hasRole(userId, role) {
-    const result = await pool.query('SELECT * FROM roles WHERE user_id = $1 AND role_type = $2', [userId, role]);
-    return result.rows.length > 0;
+    try {
+        const result = await pool.query('SELECT * FROM roles WHERE user_id = $1 AND role_type = $2', [userId, role]).catch(() => ({ rows: [] }));
+        return result.rows.length > 0;
+    } catch (error) {
+        return false;
+    }
 }
 
 async function checkCooldown(userId, command, cooldownSeconds) {
     try {
-        const result = await pool.query('SELECT last_used FROM cooldowns WHERE user_id = $1 AND command = $2', [userId, command]);
+        const result = await pool.query('SELECT last_used FROM cooldowns WHERE user_id = $1 AND command = $2', [userId, command]).catch(() => ({ rows: [] }));
         if (result.rows.length > 0) {
             const lastUsed = new Date(result.rows[0].last_used);
             const now = new Date();
@@ -764,19 +672,16 @@ async function checkCooldown(userId, command, cooldownSeconds) {
             await pool.query(
                 'INSERT INTO cooldowns (user_id, command, last_used) VALUES ($1, $2, NOW()) ON CONFLICT (user_id, command) DO UPDATE SET last_used = NOW()',
                 [userId, command]
-            );
-        } catch (dbErr) {
-            // If constraint fails, try upsert alternative
-            try {
-                await pool.query('DELETE FROM cooldowns WHERE user_id = $1 AND command = $2', [userId, command]);
-                await pool.query('INSERT INTO cooldowns (user_id, command, last_used) VALUES ($1, $2, NOW())', [userId, command]);
-            } catch (e) {
-                console.error('[checkCooldown] DB error (non-fatal):', e.message);
-            }
+            ).catch(async (dbErr) => {
+                await pool.query('DELETE FROM cooldowns WHERE user_id = $1 AND command = $2', [userId, command]).catch(() => {});
+                await pool.query('INSERT INTO cooldowns (user_id, command, last_used) VALUES ($1, $2, NOW())', [userId, command]).catch(() => {});
+            });
+        } catch (e) {
+            console.error('[checkCooldown] DB error (non-fatal):', e?.message || e);
         }
         return 0;
     } catch (error) {
-        console.error('[checkCooldown] Unexpected error:', error.message);
+        console.error('[checkCooldown] Unexpected error:', error?.message || error);
         return 0;
     }
 }
