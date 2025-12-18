@@ -8,17 +8,23 @@ const OFFICIAL_GROUP = '-1002503593313';
 const OFFICIAL_GROUP_LINK = 'https://t.me/AQUA_REALM';
 const GUESS_REWARD = 100;
 
+// Detect if guess bot token is the same as the main bot token(s.
+const mainTokens = [process.env.TELEGRAM_BOT_TOKEN, process.env.BOT_TOKEN, process.env.BOT_TOKEN_1].filter(Boolean);
+const usesMainToken = GUESS_BOT_TOKEN && mainTokens.includes(GUESS_BOT_TOKEN);
+
 let guessBot = null;
 const activeGuesses = new Map();
 
-if (GUESS_BOT_TOKEN) {
+if (!GUESS_BOT_TOKEN) {
+    console.log('⚠️ Guess bot not initialized - missing GUESS_BOT_TOKEN');
+} else if (usesMainToken) {
+    // If the guess bot uses the same token as the main bot, do NOT create a second TelegramBot instance.
+    console.log('⚠️ Guess bot token matches main bot token - using main bot instance instead of separate guess bot');
+} else {
     guessBot = new TelegramBot(GUESS_BOT_TOKEN, { polling: false });
-    
     console.log('✅ Guess Bot initialized (no polling)');
     console.log('🎮 Official Group ID:', OFFICIAL_GROUP);
     setupGuessBotHandlers();
-} else {
-    console.log('⚠️ Guess bot not initialized - missing GUESS_BOT_TOKEN');
 }
 
 function setupGuessBotHandlers() {
@@ -181,5 +187,6 @@ module.exports = {
     activeGuesses, 
     startGuessBotPolling,
     processGuessBotUpdate,
-    setupGuessBotHandlers
+    setupGuessBotHandlers,
+    usesMainToken
 };

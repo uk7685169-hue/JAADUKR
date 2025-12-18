@@ -400,8 +400,8 @@ initializeDatabase().then(() => {
 }).then(() => {
     console.log('✅ Main bot webhook setup complete');
     
-    // Start guess bot after main bot is ready
-    if (guessBotModule && guessBotModule.startGuessBotPolling) {
+    // Start guess bot after main bot is ready (only if it is a separate bot token)
+    if (guessBotModule && guessBotModule.startGuessBotPolling && !guessBotModule.usesMainToken) {
         return guessBotModule.startGuessBotPolling();
     }
     return true;
