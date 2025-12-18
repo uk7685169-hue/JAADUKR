@@ -192,6 +192,35 @@ function initializeDatabase() {
         `);
         console.log('✅ Redeem codes table ready');
 
+        // Custom commands table (for command-based rewards)
+        db.exec(`
+            CREATE TABLE IF NOT EXISTS custom_commands (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                command_trigger TEXT UNIQUE NOT NULL,
+                reward_type TEXT NOT NULL,
+                reward_amount INTEGER,
+                waifu_id INTEGER,
+                expires_at TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(waifu_id) REFERENCES waifus(waifu_id)
+            )
+        `);
+        console.log('✅ Custom commands table ready');
+
+        // Dynamic commands table (for user-defined commands)
+        db.exec(`
+            CREATE TABLE IF NOT EXISTS dynamic_commands (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                command_name TEXT UNIQUE NOT NULL,
+                command_response TEXT NOT NULL,
+                is_permanent BOOLEAN DEFAULT 1,
+                created_by INTEGER,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(created_by) REFERENCES users(user_id)
+            )
+        `);
+        console.log('✅ Dynamic commands table ready');
+
         console.log('✅ All database tables initialized');
     } catch (error) {
         console.error('❌ Database initialization error:', error);

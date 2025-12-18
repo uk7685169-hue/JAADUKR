@@ -57,6 +57,24 @@ bot.onText = (regex, handler) => _origOnText(regex, _wrapHandler(handler));
 // SQLite database initialized via db-helpers.js and db.js
 console.log('✅ SQLite database ready (pool compatibility layer active)');
 
+// Stub functions for auto-save (SQLite persists automatically)
+async function saveAllData() {
+    // SQLite persists automatically - no manual save needed
+    return Promise.resolve();
+}
+async function saveUsersData() {
+    // SQLite persists automatically - no manual save needed
+    return Promise.resolve();
+}
+async function saveBotData() {
+    // SQLite persists automatically - no manual save needed
+    return Promise.resolve();
+}
+async function saveWaifusData() {
+    // SQLite persists automatically - no manual save needed
+    return Promise.resolve();
+}
+
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -291,7 +309,7 @@ async function initializeSpawnTracker() {
                 waifu_id INT,
                 max_uses INT DEFAULT 1,
                 uses INT DEFAULT 0,
-                created_at TIMESTAMP DEFAULT NOW()
+                created_at TIMESTAMP DEFAULT datetime('now')
             )
         `);
         console.log('✅ Redeem codes table ready');
@@ -562,7 +580,7 @@ async function ensureUser(userId, username, firstName) {
         `).catch(() => {});
         
         const result = await pool.query(
-            'INSERT INTO users (user_id, username, first_name) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO UPDATE SET username = $2, first_name = $3 RETURNING *',
+            'INSERT INTO users (user_id, username, first_name) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO UPDATE SET username = $2, first_name = $3',
             [userId, username, firstName]
         ).catch(() => ({ rows: [{ user_id: userId, username, first_name: firstName, berries: 50000 }] }));
         await saveUserDataToFile(userId);
@@ -584,12 +602,12 @@ async function checkBanned(userId) {
 
 async function checkSpamBlock(userId) {
     try {
-        const result = await pool.query('SELECT * FROM spam_blocks WHERE user_id = $1 AND blocked_until > NOW()', [userId]).catch(() => ({ rows: [] }));
+        const result = await pool.query('SELECT * FROM spam_blocks WHERE user_id = $1 AND blocked_until > datetime('now')', [userId]).catch(() => ({ rows: [] }));
         if (result.rows.length > 0) {
             return result.rows[0].blocked_until;
         }
 
-        await pool.query('DELETE FROM spam_blocks WHERE user_id = $1 AND blocked_until <= NOW()', [userId]).catch(console.error);
+        await pool.query('DELETE FROM spam_blocks WHERE user_id = $1 AND blocked_until <= datetime('now')', [userId]).catch(console.error);
         return null;
     } catch (error) {
         return null;
@@ -660,11 +678,11 @@ async function checkCooldown(userId, command, cooldownSeconds) {
         
         try {
             await pool.query(
-                'INSERT INTO cooldowns (user_id, command, last_used) VALUES ($1, $2, NOW()) ON CONFLICT (user_id, command) DO UPDATE SET last_used = NOW()',
+                'INSERT INTO cooldowns (user_id, command, last_used) VALUES ($1, $2, datetime('now')) ON CONFLICT (user_id, command) DO UPDATE SET last_used = datetime('now')',
                 [userId, command]
             ).catch(async (dbErr) => {
                 await pool.query('DELETE FROM cooldowns WHERE user_id = $1 AND command = $2', [userId, command]).catch(() => {});
-                await pool.query('INSERT INTO cooldowns (user_id, command, last_used) VALUES ($1, $2, NOW())', [userId, command]).catch(() => {});
+                await pool.query('INSERT INTO cooldowns (user_id, command, last_used) VALUES ($1, $2, datetime('now'))', [userId, command]).catch(() => {});
             });
         } catch (e) {
             console.error('[checkCooldown] DB error (non-fatal):', e?.message || e);
@@ -1234,7 +1252,7 @@ bot.onText(/\/daily/, async (msg) => {
     const streak = (!lastDaily || (now - lastDaily) / (1000 * 60 * 60 * 48) < 1) ? user.daily_streak + 1 : 1;
     let dailyReward = 50000;
 
-    await pool.query('UPDATE users SET berries = berries + $1, daily_streak = $2, last_daily_claim = NOW() WHERE user_id = $3', 
+    await pool.query('UPDATE users SET berries = berries + $1, daily_streak = $2, last_daily_claim = datetime('now') WHERE user_id = $3', 
         [dailyReward, streak, userId]);
     await saveUserDataToFile(userId);
 
@@ -1259,7 +1277,7 @@ bot.onText(/\/weekly/, async (msg) => {
     const streak = (!lastWeekly || (now - lastWeekly) / (1000 * 60 * 60 * 24 * 14) < 1) ? user.weekly_streak + 1 : 1;
     let weeklyReward = 3000000;
 
-    await pool.query('UPDATE users SET berries = berries + $1, weekly_streak = $2, last_weekly_claim = NOW() WHERE user_id = $3', 
+    await pool.query('UPDATE users SET berries = berries + $1, weekly_streak = $2, last_weekly_claim = datetime('now') WHERE user_id = $3', 
         [weeklyReward, streak, userId]);
     await saveUserDataToFile(userId);
 
@@ -1296,7 +1314,7 @@ bot.onText(/\/marry/, async (msg) => {
         return sendReply(msg.chat.id, msg.message_id, `${msg.from.first_name}, ʏᴏᴜʀ ᴍᴀʀʀɪᴀɢᴇ ᴘʀᴏᴘᴏꜱᴀʟ ᴡᴀꜱ ʀᴇᴊᴇᴄᴛᴇᴅ ᴀɴᴅ ꜱʜᴇ ʀᴀɴ ᴀᴡᴀʏ! 🤡`);
     }
 
-    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, waifu.waifu_id]);
+    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT NOTHING', [userId, waifu.waifu_id]);
     await saveUserDataToFile(userId);
     
     // Auto-save users data after marry
@@ -1857,7 +1875,7 @@ bot.onText(/\/adev(?:\s+(.+))?/, async (msg, match) => {
     // If no args and no reply, give dev to yourself
     if (!msg.reply_to_message && !match[1]) {
         await ensureUser(userId, msg.from.username, msg.from.first_name);
-        await pool.query('INSERT INTO roles (user_id, role_type) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, 'dev']);
+        await pool.query('INSERT INTO roles (user_id, role_type) VALUES ($1, $2) ON CONFLICT NOTHING', [userId, 'dev']);
         return sendReply(msg.chat.id, msg.message_id, '✅ You now have developer role!');
     }
 
@@ -1909,7 +1927,7 @@ bot.onText(/\/adev(?:\s+(.+))?/, async (msg, match) => {
     await ensureUser(targetId, targetUsername, targetName);
     
     // Then add dev role
-    await pool.query('INSERT INTO roles (user_id, role_type) VALUES ($1, $2) ON CONFLICT DO NOTHING', [targetId, 'dev']);
+    await pool.query('INSERT INTO roles (user_id, role_type) VALUES ($1, $2) ON CONFLICT NOTHING', [targetId, 'dev']);
 
     const displayName = targetUsername ? `@${targetUsername}` : targetName;
     sendReply(msg.chat.id, msg.message_id, `✅ ${displayName} (ID: ${targetId}) is now a developer!`);
@@ -1955,7 +1973,7 @@ bot.onText(/\/rdev(?:\s+(.+))?/, async (msg, match) => {
         return sendReply(msg.chat.id, msg.message_id, '❌ Reply to a user or use: /rdev @username or /rdev [user_id]');
     }
 
-    const result = await pool.query("DELETE FROM roles WHERE user_id = $1 AND role_type = 'dev' RETURNING *", [targetId]);
+    const result = await pool.query("DELETE FROM roles WHERE user_id = $1 AND role_type = 'dev'", [targetId]);
 
     if (result.rowCount === 0) {
         return sendReply(msg.chat.id, msg.message_id, `❌ ${targetName} is not a developer!`);
@@ -1992,7 +2010,7 @@ bot.onText(/\/reset_waifu\s+(.+)/, async (msg, match) => {
             return sendReply(msg.chat.id, msg.message_id, '❌ Reply to a user or provide username/ID!');
         }
 
-        const result = await pool.query('DELETE FROM harem WHERE user_id = $1 AND waifu_id = $2 RETURNING *', [target.targetId, waifuId]);
+        const result = await pool.query('DELETE FROM harem WHERE user_id = $1 AND waifu_id = $2', [target.targetId, waifuId]);
 
         if (result.rowCount === 0) {
             return sendReply(msg.chat.id, msg.message_id, '❌ User does not own this waifu!');
@@ -2133,7 +2151,7 @@ bot.onText(/\/gunban\s+(.+)/, async (msg, match) => {
         return sendReply(msg.chat.id, msg.message_id, '❌ Reply to a user or provide username/ID!');
     }
 
-    const result = await pool.query('DELETE FROM banned_users WHERE user_id = $1 RETURNING *', [target.targetId]);
+    const result = await pool.query('DELETE FROM banned_users WHERE user_id = $1', [target.targetId]);
 
     if (result.rowCount === 0) {
         return sendReply(msg.chat.id, msg.message_id, '❌ User is not banned!');
@@ -2241,7 +2259,7 @@ bot.onText(/\/give\s+(.+)/, async (msg, match) => {
     }
 
     await ensureUser(targetId, msg.reply_to_message.from.username, msg.reply_to_message.from.first_name);
-    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [targetId, waifuId]);
+    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT NOTHING', [targetId, waifuId]);
     await saveUserDataToFile(targetId);
 
     sendReply(msg.chat.id, msg.message_id, `✅ Gave ${waifuCheck.rows[0].name} to ${msg.reply_to_message.from.first_name}!`);
@@ -2308,7 +2326,7 @@ bot.onText(/\/give_waifu\s+(.+)/, async (msg, match) => {
     }
     
     await ensureUser(target.targetId, targetUsername, targetFirstName);
-    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [target.targetId, waifu.waifu_id]);
+    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT NOTHING', [target.targetId, waifu.waifu_id]);
     await saveUserDataToFile(target.targetId);
 
     sendReply(msg.chat.id, msg.message_id, `✅ Gave ${waifu.name} (ID: ${waifu.waifu_id}) to ${targetFirstName}!`);
@@ -2389,7 +2407,7 @@ bot.onText(/\/gift(?:\s+(.+))?/, async (msg, match) => {
     const waifu = await pool.query('SELECT * FROM waifus WHERE waifu_id = $1', [waifuId]);
 
     await pool.query('DELETE FROM harem WHERE user_id = $1 AND waifu_id = $2', [fromId, waifuId]);
-    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [toId, waifuId]);
+    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT NOTHING', [toId, waifuId]);
     await ensureUser(toId, msg.reply_to_message.from.username, msg.reply_to_message.from.first_name);
     await saveUserDataToFile(fromId);
     await saveUserDataToFile(toId);
@@ -2410,7 +2428,7 @@ bot.onText(/\/adduploader/, async (msg) => {
 
     const targetId = msg.reply_to_message.from.id;
     await ensureUser(targetId, msg.reply_to_message.from.username, msg.reply_to_message.from.first_name);
-    await pool.query('INSERT INTO roles (user_id, role_type) VALUES ($1, $2) ON CONFLICT DO NOTHING', [targetId, 'uploader']);
+    await pool.query('INSERT INTO roles (user_id, role_type) VALUES ($1, $2) ON CONFLICT NOTHING', [targetId, 'uploader']);
 
     sendReply(msg.chat.id, msg.message_id, `✅ ${msg.reply_to_message.from.first_name} is now an uploader!`);
 });
@@ -2445,7 +2463,7 @@ bot.onText(/\/addsudo/, async (msg) => {
 
     const targetId = msg.reply_to_message.from.id;
     await ensureUser(targetId, msg.reply_to_message.from.username, msg.reply_to_message.from.first_name);
-    await pool.query('INSERT INTO roles (user_id, role_type) VALUES ($1, $2) ON CONFLICT DO NOTHING', [targetId, 'sudo']);
+    await pool.query('INSERT INTO roles (user_id, role_type) VALUES ($1, $2) ON CONFLICT NOTHING', [targetId, 'sudo']);
 
     sendReply(msg.chat.id, msg.message_id, `✅ ${msg.reply_to_message.from.first_name} is now a sudo user!`);
 });
@@ -2689,7 +2707,7 @@ bot.onText(/\/dwaifu/, async (msg) => {
         return sendReply(msg.chat.id, msg.message_id, '❌ No waifus available yet!');
     }
 
-    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, waifu.waifu_id]);
+    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT NOTHING', [userId, waifu.waifu_id]);
     await pool.query('UPDATE users SET last_claim_date = CURRENT_DATE WHERE user_id = $1', [userId]);
     await saveUserDataToFile(userId);
 
@@ -2803,7 +2821,7 @@ bot.onText(/\/uploaddp/, async (msg) => {
                 file_id TEXT NOT NULL,
                 media_type TEXT NOT NULL,
                 uploaded_by BIGINT,
-                created_at TIMESTAMP DEFAULT NOW()
+                created_at TIMESTAMP DEFAULT datetime('now')
             )
         `);
 
@@ -3176,7 +3194,7 @@ bot.onText(/\/redeem\s+(.+)/, async (msg, match) => {
             return sendReply(msg.chat.id, msg.message_id, '❌ Waifu not found!');
         }
 
-        await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, c.waifu_id]);
+        await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT NOTHING', [userId, c.waifu_id]);
         await pool.query('UPDATE redeem_codes SET uses = uses + 1 WHERE code = $1', [code]);
         await saveUserDataToFile(userId);
 
@@ -3217,7 +3235,7 @@ bot.onText(/\/dredeem\s+(.+)/, async (msg, match) => {
             return sendReply(msg.chat.id, msg.message_id, '❌ Waifu not found!');
         }
 
-        await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, c.waifu_id]);
+        await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT NOTHING', [userId, c.waifu_id]);
         await pool.query('UPDATE redeem_codes SET uses = uses + 1 WHERE code = $1', [code]);
         await saveUserDataToFile(userId);
 
@@ -3320,7 +3338,7 @@ bot.onText(/\/delcode\s+(.+)/, async (msg, match) => {
 
     const code = match[1].trim().toUpperCase();
 
-    const result = await pool.query('DELETE FROM redeem_codes WHERE code = $1 RETURNING *', [code]);
+    const result = await pool.query('DELETE FROM redeem_codes WHERE code = $1', [code]);
 
     if (result.rowCount === 0) {
         return sendReply(msg.chat.id, msg.message_id, '❌ Code not found!');
@@ -3446,7 +3464,7 @@ bot.on('callback_query', async (query) => {
         }
 
         await pool.query('UPDATE users SET berries = berries - $1 WHERE user_id = $2', [price, userId]);
-        await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, waifuId]);
+        await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT NOTHING', [userId, waifuId]);
         await ensureUser(userId, query.from.username, query.from.first_name);
         await saveUserDataToFile(userId);
 
@@ -3544,7 +3562,7 @@ bot.onText(/\/buy\s+(\d+)/, async (msg, match) => {
 
     await pool.query('UPDATE users SET berries = berries - $1 WHERE user_id = $2', [i.price, userId]);
     await pool.query('UPDATE users SET berries = berries + $1 WHERE user_id = $2', [i.price, i.seller_id]);
-    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, i.waifu_id]);
+    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT NOTHING', [userId, i.waifu_id]);
     await pool.query('DELETE FROM harem WHERE user_id = $1 AND waifu_id = $2', [i.seller_id, i.waifu_id]);
     await pool.query("UPDATE bazaar_items SET status = 'sold' WHERE item_id = $1", [itemId]);
     await saveUserDataToFile(userId);
@@ -3637,7 +3655,7 @@ bot.on("message", async (msg) => { try {
 
             if (bid.current_bidder_id) {
                 await pool.query('UPDATE users SET berries = berries - $1 WHERE user_id = $2', [bid.current_bid, bid.current_bidder_id]);
-                await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [bid.current_bidder_id, bid.waifu_id]);
+                await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT NOTHING', [bid.current_bidder_id, bid.waifu_id]);
                 await ensureUser(bid.current_bidder_id, null, 'Bidder');
                 await saveUserDataToFile(bid.current_bidder_id);
 
@@ -3658,7 +3676,7 @@ bot.on("message", async (msg) => { try {
         // CRITICAL: Use transaction to prevent race condition (16 waifus bug)
         // Only ONE spawn per 100 messages - STRICTLY enforce with database lock
         const result = await pool.query(
-            'UPDATE spawn_tracker SET active_spawn_waifu_id = -999, message_count = 0 WHERE group_id = $1 AND active_spawn_waifu_id IS NULL AND message_count >= 100 RETURNING *',
+            'UPDATE spawn_tracker SET active_spawn_waifu_id = -999, message_count = 0 WHERE group_id = $1 AND active_spawn_waifu_id IS NULL AND message_count >= 100',
             [groupId]
         );
         
@@ -3745,7 +3763,7 @@ bot.onText(/\/grab(?:\s+(.+))?/, async (msg, match) => {
 
     const w = waifu.rows[0];
 
-    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, waifuId]);
+    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT NOTHING', [userId, waifuId]);
     await pool.query('UPDATE spawn_tracker SET active_spawn_waifu_id = NULL, active_spawn_name = NULL, message_count = 0 WHERE group_id = $1', [groupId]);
     await ensureUser(userId, msg.from.username, msg.from.first_name);
     await saveUserDataToFile(userId);
@@ -3804,7 +3822,7 @@ bot.onText(/\/propose(?:\s+(\d+))?/, async (msg, match) => {
 
     // Deduct cost and add waifu to harem
     await pool.query('UPDATE users SET berries = berries - $1 WHERE user_id = $2', [PROPOSAL_COST, userId]);
-    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, waifuId]);
+    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT NOTHING', [userId, waifuId]);
     await saveUserDataToFile(userId);
 
     const message = `💍 𝗣𝗥𝗢𝗣𝗢𝗦𝗔𝗟 𝗔𝗖𝗖𝗘𝗣𝗧𝗘𝗗!\n\n✨ You successfully proposed to ${waifu.name}!\n💸 Cost: -${PROPOSAL_COST} 💸\n\n💝 Congratulations on your marriage! 🎉`;
@@ -4290,7 +4308,7 @@ bot.onText(/\/goal(?:\s+(.+))?/, async (msg, match) => {
             CREATE TABLE IF NOT EXISTS user_goals (
                 user_id BIGINT PRIMARY KEY,
                 description TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT NOW()
+                created_at TIMESTAMP DEFAULT datetime('now')
             )
         `);
 
@@ -4404,7 +4422,7 @@ bot.onText(/\/add_waifu\s+(\d+)\s+(\d+)/, async (msg, match) => {
         return sendReply(msg.chat.id, msg.message_id, '❌ Waifu not found!');
     }
 
-    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [targetUserId, waifuId]);
+    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT NOTHING', [targetUserId, waifuId]);
     await saveUserDataToFile(targetUserId);
 
     sendReply(msg.chat.id, msg.message_id, `✅ Gave ${waifu.rows[0].name} to ${targetUser.rows[0].first_name}!`);
@@ -4541,7 +4559,7 @@ bot.onText(/\/give_data\s+(.+)/, async (msg, match) => {
         // Restore some waifus (give 5 random common/rare waifus)
         const waifu1 = await pool.query('SELECT waifu_id FROM waifus WHERE rarity IN (1,2) ORDER BY RANDOM() LIMIT 5');
         for (const waifu of waifu1.rows) {
-            await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [target.targetId, waifu.waifu_id]);
+            await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT NOTHING', [target.targetId, waifu.waifu_id]);
         }
 
         // Save data
@@ -4571,7 +4589,7 @@ bot.onText(/\/treasure/, async (msg) => {
                 user_id BIGINT PRIMARY KEY,
                 winning_position INT NOT NULL,
                 gems_amount INT NOT NULL DEFAULT 1,
-                created_at TIMESTAMP DEFAULT NOW()
+                created_at TIMESTAMP DEFAULT datetime('now')
             )
         `);
 
@@ -4782,7 +4800,7 @@ bot.onText(/\/give_waifu(?:\s+(\d+))?/, async (msg, match) => {
 
         const waifu = waifuCheck.rows[0];
         await ensureUser(targetId, msg.reply_to_message.from.username, msg.reply_to_message.from.first_name);
-        await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [targetId, waifuId]);
+        await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT NOTHING', [targetId, waifuId]);
         await saveUserDataToFile(targetId);
         
         sendReply(msg.chat.id, msg.message_id, `✅ Gave waifu <b>${waifu.name}</b> (ID: ${waifuId}) to ${msg.reply_to_message.from.first_name}!`);
@@ -4852,7 +4870,7 @@ bot.onText(/\/addreward\s+\/(\w+)\s+[Gg]ive\s+(.+)/i, async (msg, match) => {
                 waifu_id INT,
                 created_by BIGINT NOT NULL,
                 expires_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT NOW()
+                created_at TIMESTAMP DEFAULT datetime('now')
             )
         `);
 
@@ -4907,7 +4925,7 @@ bot.onText(/\/delreward\s+\/(\w+)/i, async (msg, match) => {
     const trigger = match[1].toLowerCase();
 
     try {
-        const result = await pool.query('DELETE FROM custom_commands WHERE command_trigger = $1 RETURNING *', [trigger]);
+        const result = await pool.query('DELETE FROM custom_commands WHERE command_trigger = $1', [trigger]);
         
         if (result.rows.length === 0) {
             return sendReply(msg.chat.id, msg.message_id, `❌ Reward command /${trigger} not found!`);
@@ -4985,7 +5003,7 @@ bot.on('message', async (msg) => {
             if (waifuCheck.rows.length === 0) {
                 return sendReply(msg.chat.id, msg.message_id, '❌ Waifu not found!');
             }
-            await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, c.waifu_id]);
+            await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT NOTHING', [userId, c.waifu_id]);
             await saveUserDataToFile(userId);
             sendReply(msg.chat.id, msg.message_id, `🎁 ${msg.from.first_name} received waifu <b>${waifuCheck.rows[0].name}</b>!`);
         }
@@ -5052,7 +5070,7 @@ bot.onText(/\/delcmd\s+\/(\w+)/, async (msg, match) => {
     const commandName = match[1].toLowerCase();
 
     try {
-        const result = await pool.query('DELETE FROM dynamic_commands WHERE command_name = $1 RETURNING *', [commandName]);
+        const result = await pool.query('DELETE FROM dynamic_commands WHERE command_name = $1', [commandName]);
         
         if (result.rows.length === 0) {
             return sendReply(msg.chat.id, msg.message_id, `❌ Command /${commandName} not found!`);
