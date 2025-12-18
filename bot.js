@@ -407,22 +407,24 @@ ensureBackupDir();
 async function backupAllData() {
     try {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-
-        const users = await pool.query('SELECT * FROM users').catch(() => ({ rows: [] }));
-        const waifus = await pool.query('SELECT * FROM waifus').catch(() => ({ rows: [] }));
-        const harem = await pool.query('SELECT * FROM harem').catch(() => ({ rows: [] }));
-        const roles = await pool.query('SELECT * FROM roles').catch(() => ({ rows: [] }));
+        const dbFile = path.join(__dirname, 'data', 'db.json');
+        let db = null;
+        try {
+            const txt = await fs.readFile(dbFile, 'utf8');
+            db = JSON.parse(txt);
+        } catch (e) {
+            console.warn('Could not read data/db.json for backup, falling back to empty snapshot');
+            db = { users: [], waifus: [], statistics: {} };
+        }
 
         const backupData = {
             timestamp: new Date().toISOString(),
-            users: users.rows,
-            waifus: waifus.rows,
-            harem: harem.rows,
-            roles: roles.rows
+            source: 'data/db.json',
+            snapshot: db
         };
 
         const backupPath = path.join(BACKUP_DIR, `backup_${timestamp}.json`);
-        await fs.writeFile(backupPath, JSON.stringify(backupData, null, 2));
+        await fs.writeFile(backupPath, JSON.stringify(backupData, null, 2), 'utf8');
 
         console.log(`✅ Backup saved: ${backupPath}`);
     } catch (error) {

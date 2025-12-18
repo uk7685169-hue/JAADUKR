@@ -4,10 +4,9 @@ const Waifu = require('./models/Waifu');
 const User = require('./models/User');
 
 const GUESS_BOT_TOKEN = process.env.GUESS_BOT_TOKEN || process.env.GUESS_TOKEN;
-const OFFICIAL_GROUP = '-1002503593313';
+const OFFICIAL_GROUP = '-3209147191';
 const OFFICIAL_GROUP_LINK = 'https://t.me/AQUA_REALM';
-const GUESS_REWARD = 100;
-
+const GUESS_REWARD = 121;
 // Detect if guess bot token is the same as the main bot token(s.
 const mainTokens = [process.env.TELEGRAM_BOT_TOKEN, process.env.BOT_TOKEN, process.env.BOT_TOKEN_1].filter(Boolean);
 const usesMainToken = GUESS_BOT_TOKEN && mainTokens.includes(GUESS_BOT_TOKEN);
