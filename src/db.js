@@ -1,5 +1,5 @@
 const sqlite3 = require('sqlite3').verbose();
-const DB_PATH = '/tmp/waifu.db';
+const DB_PATH = process.env.DB_PATH || '/tmp/waifu.db';
 
 let dbInstance = null;
 let _ready = null;
