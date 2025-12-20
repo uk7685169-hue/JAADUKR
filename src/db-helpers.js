@@ -1,18 +1,14 @@
-const { query } = require('./db');
+const db = require('./db');
 
-function createCompatPool() {
-  return {
-    query: async (sql, params = []) => {
-      // Delegate to src/db.js query implementation
-      if (!Array.isArray(params)) {
-        if (params === undefined || params === null) params = [];
-        else params = [params];
-      }
-      return await query(sql, params);
+// Expose a `pool` compatibility object with `query(sql, params)` to match existing code
+const pool = {
+  query: async (sql, params = []) => {
+    if (!Array.isArray(params)) {
+      if (params === undefined || params === null) params = [];
+      else params = [params];
     }
-  };
-}
-
-const pool = createCompatPool();
+    return db.query(sql, params);
+  }
+};
 
 module.exports = { pool };
