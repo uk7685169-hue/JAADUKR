@@ -1,5 +1,5 @@
 require('dotenv').config();
-const TelegramBot = require('node-telegram-bot-api');
+const { createPollingBot } = require('./bot-utils');
 const Waifu = require('./models/Waifu');
 const User = require('./models/User');
 
@@ -18,7 +18,7 @@ const activeGuesses = new Map();
 if (!GUESS_BOT_TOKEN && !usesMainToken) {
     console.log('⚠️ Guess bot not initialized - missing GUESS_BOT_TOKEN and not using main token');
 } else if (GUESS_BOT_TOKEN && !usesMainToken) {
-    guessBot = new TelegramBot(GUESS_BOT_TOKEN, { polling: true });
+    guessBot = createPollingBot(GUESS_BOT_TOKEN, { polling: true });
     console.log('✅ Guess Bot initialized (separate token/polling)');
     console.log('🎮 Official Group ID:', OFFICIAL_GROUP);
     setupGuessBotHandlers();
