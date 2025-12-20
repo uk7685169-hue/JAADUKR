@@ -1,4 +1,4 @@
-const { db } = require('../db');
+const { query } = require('../db');
 
 class Harem {
     constructor(data = {}) {
@@ -10,11 +10,11 @@ class Harem {
 
     static async find(filter = {}) {
         if (filter.user_id) {
-            const rows = db.prepare('SELECT * FROM harem WHERE user_id = ?').all(filter.user_id);
-            return rows.map(r => new Harem(r));
+            const res = await query('SELECT * FROM harem WHERE user_id = $1', [filter.user_id]);
+            return res.rows.map(r => new Harem(r));
         }
-        const rows = db.prepare('SELECT * FROM harem').all();
-        return rows.map(r => new Harem(r));
+        const res = await query('SELECT * FROM harem');
+        return res.rows.map(r => new Harem(r));
     }
 }
 

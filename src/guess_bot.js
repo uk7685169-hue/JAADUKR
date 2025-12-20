@@ -18,8 +18,10 @@ const activeGuesses = new Map();
 if (!GUESS_BOT_TOKEN && !usesMainToken) {
     console.log('⚠️ Guess bot not initialized - missing GUESS_BOT_TOKEN and not using main token');
 } else if (GUESS_BOT_TOKEN && !usesMainToken) {
-    guessBot = createPollingBot(GUESS_BOT_TOKEN, { polling: true });
-    console.log('✅ Guess Bot initialized (separate token/polling)');
+    // Do NOT start polling on Render; create non-polling bot unless ENABLE_POLLING is explicitly set
+    const enablePolling = (process.env.ENABLE_POLLING === 'true');
+    guessBot = createPollingBot(GUESS_BOT_TOKEN, { polling: !!enablePolling });
+    console.log('✅ Guess Bot initialized (separate token) - polling:', !!enablePolling);
     console.log('🎮 Official Group ID:', OFFICIAL_GROUP);
     setupGuessBotHandlers();
 } else if (usesMainToken) {

@@ -30,14 +30,16 @@ if (!token) {
     // DO NOT EXIT - let Railway keep trying
 }
 
-const disablePolling = (process.env.DISABLE_POLLING === 'true');
+// Default: do NOT poll. Enable polling only if ENABLE_POLLING=true (explicit).
+const enablePolling = (process.env.ENABLE_POLLING === 'true');
 let bot;
 if (token) {
-    if (disablePolling) {
-        console.warn('⚠️ DISABLE_POLLING=true — creating bot without polling. Use webhooks or a single polling instance.');
-        bot = new TelegramBot(token, { polling: false });
-    } else {
+    if (enablePolling) {
+        console.warn('⚠️ ENABLE_POLLING=true — starting polling (not recommended on Render)');
         bot = new TelegramBot(token, { polling: true });
+    } else {
+        // Webhook mode (no polling)
+        bot = new TelegramBot(token, { polling: false });
     }
 } else {
     console.error('⚠️ Bot token not found. Running in safe no-op mode.');
@@ -108,16 +110,14 @@ async function initializeDatabase() {
 // CRITICAL: Clear spawn_tracker on bot startup to prevent race conditions
 async function initializeSpawnTracker() {
     try {
-        // Use direct db (better-sqlite3) to safely clear spawn tracker
-        const { db: sqliteDb } = require('./src/db');
         try {
-            sqliteDb.prepare('DELETE FROM spawn_tracker WHERE message_count >= 100 OR active_spawn_waifu_id IS NOT NULL').run();
+            await pool.query('DELETE FROM spawn_tracker WHERE message_count >= 100 OR active_spawn_waifu_id IS NOT NULL');
             console.log('✅ Spawn tracker cleared on startup (SQLite)');
         } catch (e) {
             console.warn('⚠️ spawn_tracker cleanup skipped or table missing:', e?.message || e);
         }
     } catch (error) {
-        console.error('Error initializing spawn tracker (module load):', error);
+        console.error('Error initializing spawn tracker:', error);
     }
 }
 

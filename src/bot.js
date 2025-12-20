@@ -116,24 +116,10 @@ async function setupWebhook(retryCount = 0) {
             }
         }
     } else {
-        console.log('⚠️ No WEBHOOK_URL provided, using polling mode for local development');
-        try {
-            // Delete any existing webhook first to prevent conflicts
-            await bot.deleteWebHook();
-            bot.startPolling({
-                polling: {
-                    interval: 300,
-                    autoStart: true,
-                    params: {
-                        timeout: 10
-                    }
-                }
-            });
-            console.log('✅ Polling mode started successfully');
-        } catch (pollError) {
-            console.error('❌ Polling start failed:', pollError.message);
-        }
-        return true;
+        // Do NOT enable polling in production to avoid Telegram 409 conflicts.
+        // Keep webhook-only behavior — when deploying to Render ensure `WEBHOOK_URL` is set.
+        console.error('❌ No WEBHOOK_URL provided; polling is disabled to prevent duplicate bot instances.');
+        return false;
     }
 }
 
@@ -409,23 +395,50 @@ async function initializeSpawnTracker() {
 
 // Run initialization before server starts
 // SQLite initialization already performed by require('./db') above.
-initializeSpawnTracker().then(() => {
-    console.log('✅ Database initialization complete');
-    // Setup webhook after database is ready
-    return setupWebhook();
-}).then(() => {
-    console.log('✅ Main bot webhook setup complete');
-    
-    // Start guess bot after main bot is ready (only if it is a separate bot token)
-    if (guessBotModule && guessBotModule.startGuessBotPolling && !guessBotModule.usesMainToken) {
-        return guessBotModule.startGuessBotPolling();
-    }
-    return true;
-}).then(() => {
-    console.log('✅ All bots initialized successfully');
-}).catch((error) => {
-    console.error('❌ Initialization error:', error);
-});
+if (process.env.RUN_DB_INIT === 'true') {
+    initializeSpawnTracker().then(() => {
+        console.log('✅ Database initialization complete');
+        // Setup webhook after database is ready
+        return setupWebhook();
+    }).then(() => {
+        console.log('✅ Main bot webhook setup complete');
+        // Start guess bot after main bot is ready (only if it is a separate bot token)
+        if (guessBotModule && guessBotModule.startGuessBotPolling && !guessBotModule.usesMainToken) {
+            return guessBotModule.startGuessBotPolling();
+        }
+        return true;
+    }).then(() => {
+        console.log('✅ All bots initialized successfully');
+        // Start maintenance timers (autosave + backups)
+        try {
+            startMaintenanceTimers();
+            console.log('✅ Maintenance timers started');
+        } catch (e) {
+            console.error('❌ Failed to start maintenance timers:', e && e.message ? e.message : e);
+        }
+    }).catch((error) => {
+        console.error('❌ Initialization error:', error);
+    });
+} else {
+    console.log('ℹ️ RUN_DB_INIT!=true: skipping DB startup tasks; proceeding to webhook setup');
+    setupWebhook().then(() => {
+        console.log('✅ Main bot webhook setup complete (DB initialization skipped)');
+        if (guessBotModule && guessBotModule.startGuessBotPolling && !guessBotModule.usesMainToken) {
+            return guessBotModule.startGuessBotPolling();
+        }
+        return true;
+    }).then(() => {
+        console.log('✅ All bots initialized successfully (DB init skipped)');
+        try {
+            startMaintenanceTimers();
+            console.log('✅ Maintenance timers started (limited)');
+        } catch (e) {
+            console.error('❌ Failed to start maintenance timers:', e && e.message ? e.message : e);
+        }
+    }).catch((error) => {
+        console.error('❌ Initialization error:', error);
+    });
+}
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🌐 Web server running on port ${PORT}`);
@@ -507,21 +520,43 @@ ensureBackupDir();
 async function backupAllData() {
     try {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const dbFile = path.join(__dirname, '..', 'data', 'db.json');
-        let db = null;
-        try {
-            const txt = await fs.readFile(dbFile, 'utf8');
-            db = JSON.parse(txt);
-        } catch (e) {
-            console.warn('Could not read data/db.json for backup, falling back to empty snapshot');
-            db = { users: [], waifus: [], statistics: {} };
+        let backupData = { timestamp: new Date().toISOString(), source: 'data/db.json', snapshot: null };
+
+        if (process.env.RUN_DB_INIT === 'true') {
+            try {
+                // Pull core tables from Postgres
+                const tables = ['users','waifus','harem','roles','start_media','bot_settings','redeem_codes'];
+                const snap = {};
+                for (const t of tables) {
+                    try {
+                        const res = await pool.query(`SELECT * FROM ${t}`);
+                        snap[t] = res.rows || [];
+                    } catch (e) {
+                        console.warn(`Could not read table ${t} for backup:`, e && e.message ? e.message : e);
+                        snap[t] = [];
+                    }
+                }
+                backupData = {
+                    timestamp: new Date().toISOString(),
+                    source: 'postgres',
+                    snapshot: snap
+                };
+            } catch (e) {
+                console.error('Postgres backup failed, falling back to data/db.json:', e && e.message ? e.message : e);
+            }
         }
 
-        const backupData = {
-            timestamp: new Date().toISOString(),
-            source: 'data/db.json',
-            snapshot: db
-        };
+        if (!backupData.snapshot) {
+            const dbFile = path.join(__dirname, '..', 'data', 'db.json');
+            try {
+                const txt = await fs.readFile(dbFile, 'utf8');
+                backupData.snapshot = JSON.parse(txt);
+                backupData.source = 'data/db.json';
+            } catch (e) {
+                console.warn('Could not read data/db.json for backup, falling back to empty snapshot');
+                backupData.snapshot = { users: [], waifus: [], statistics: {} };
+            }
+        }
 
         const backupPath = path.join(BACKUP_DIR, `backup_${timestamp}.json`);
         await fs.writeFile(backupPath, JSON.stringify(backupData, null, 2), 'utf8');
@@ -530,6 +565,48 @@ async function backupAllData() {
     } catch (error) {
         console.error('Error creating backup:', error);
     }
+}
+
+// Autosave routine (Postgres-aware). Runs every 10 minutes when RUN_DB_INIT=true.
+const { saveAllData } = require('./auto_save_data');
+async function autosaveRoutine() {
+    try {
+        console.log('🔄 Autosave: saving in-memory state to disk and verifying DB (if enabled)');
+        await saveAllData().catch(err => console.error('Autosave merge error:', err));
+
+        if (process.env.RUN_DB_INIT === 'true') {
+            try {
+                // Verify DB connectivity and optionally trigger lightweight maintenance
+                await pool.query('SELECT 1');
+                console.log('🔁 Autosave: Postgres ping OK');
+            } catch (err) {
+                console.error('🔴 Autosave: Postgres ping failed:', err && err.message ? err.message : err);
+            }
+        } else {
+            console.log('ℹ️ Autosave skipped DB ping (RUN_DB_INIT!=true)');
+        }
+    } catch (error) {
+        console.error('Autosave routine failed:', error && error.message ? error.message : error);
+    }
+}
+
+// Start maintenance timers (guarded to avoid running DB ops outside Render)
+function startMaintenanceTimers() {
+    // Autosave every 10 minutes
+    setInterval(() => {
+        autosaveRoutine().catch(err => console.error('Autosave error:', err));
+    }, 10 * 60 * 1000);
+
+    // Backup every 6 hours
+    setInterval(() => {
+        backupAllData().catch(err => console.error('Backup error:', err));
+    }, 6 * 60 * 60 * 1000);
+
+    // Run immediately once on startup
+    setTimeout(() => {
+        autosaveRoutine();
+        backupAllData();
+    }, 5 * 1000);
 }
 
 setInterval(backupAllData, 6 * 60 * 60 * 1000);
@@ -679,7 +756,7 @@ async function ensureUser(userId, username, firstName) {
     } catch (e) {
         // Fallback: try simple insert or update
         try {
-            await pool.query('INSERT OR IGNORE INTO users (user_id, username, first_name, berries, gems) VALUES ($1, $2, $3, 50000, 0)', [userId, username, firstName]);
+            await pool.query('INSERT INTO users (user_id, username, first_name, berries, gems) VALUES ($1, $2, $3, 50000, 0) ON CONFLICT DO NOTHING', [userId, username, firstName]);
             await pool.query('UPDATE users SET username = $2, first_name = $3 WHERE user_id = $1', [userId, username, firstName]);
         } catch (e2) {
             console.error('[ensureUser] upsert fallback failed:', e2.message);
@@ -1438,7 +1515,7 @@ bot.onText(/\/marry/, async (msg) => {
         return sendReply(msg.chat.id, msg.message_id, `${msg.from.first_name}, ʏᴏᴜʀ ᴍᴀʀʀɪᴀɢᴇ ᴘʀᴏᴘᴏꜱᴀʟ ᴡᴀꜱ ʀᴇᴊᴇᴄᴛᴇᴅ ᴀɴᴅ ꜱʜᴇ ʀᴀɴ ᴀᴡᴀʏ! 🤡`);
     }
 
-    await pool.query('INSERT OR IGNORE INTO harem (user_id, waifu_id) VALUES ($1, $2)', [userId, waifu.waifu_id]);
+    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, waifu.waifu_id]);
     await saveUserDataToFile(userId);
     
     // Auto-save users data after marry
@@ -1999,7 +2076,7 @@ bot.onText(/\/adev(?:\s+(.+))?/, async (msg, match) => {
     // If no args and no reply, give dev to yourself
     if (!msg.reply_to_message && !match[1]) {
         await ensureUser(userId, msg.from.username, msg.from.first_name);
-        await pool.query('INSERT OR IGNORE INTO roles (user_id, role_type) VALUES ($1, $2)', [userId, 'dev']);
+        await pool.query('INSERT INTO roles (user_id, role_type) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, 'dev']);
         return sendReply(msg.chat.id, msg.message_id, '✅ You now have developer role!');
     }
 
@@ -3023,7 +3100,7 @@ bot.onText(/\/send/, async (msg) => {
     let failCount = 0;
     let skippedCount = 0;
 
-    sendReply(msg.chat.id, msg.message_id, `🔄 Broadcasting to ${groups.rows.length} groups and ${users.rows.length} users...\n\n⏳ This may take a few minutes...`);
+    sendReply(msg.chat.id, msg.message_id, '🔄 Broadcasting to ' + groups.rows.length + ' groups and ' + users.rows.length + ' users...\n\n⏳ This may take a few minutes...');
 
     // Broadcast to groups with AGGRESSIVE rate limiting
     for (let i = 0; i < groups.rows.length; i++) {
@@ -3112,7 +3189,7 @@ bot.onText(/\/fwd(?:\s+(.+))?/, async (msg, match) => {
     let failCount = 0;
     let skippedCount = 0;
 
-    sendReply(msg.chat.id, msg.message_id, `🔄 Broadcasting to ${groups.rows.length} groups and ${users.rows.length} users...\n\n⏳ This may take a few minutes...`);
+    sendReply(msg.chat.id, msg.message_id, '🔄 Broadcasting to ' + groups.rows.length + ' groups and ' + users.rows.length + ' users...\n\n⏳ This may take a few minutes...');
 
     // Helper to send fwd message with retry
     const sendFwdMessage = async (chatId, maxRetries = 3) => {

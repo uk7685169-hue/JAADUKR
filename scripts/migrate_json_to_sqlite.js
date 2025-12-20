@@ -57,7 +57,7 @@ async function upsertUser(u) {
   if (Array.isArray(u.roles)) {
     for (const r of u.roles) {
       if (!r) continue;
-      await db.query('INSERT OR IGNORE INTO roles (user_id, role_type) VALUES ($1,$2)', [userId, r]);
+      await db.query('INSERT INTO roles (user_id, role_type) VALUES ($1,$2) ON CONFLICT DO NOTHING', [userId, r]);
     }
   }
 
@@ -67,7 +67,7 @@ async function upsertUser(u) {
       const wid = toInt(h.waifu_id) || null;
       if (!wid) continue;
       const acquired = h.acquired_date || u.created_at || null;
-      await db.query('INSERT OR IGNORE INTO harem (user_id, waifu_id, acquired_date) VALUES ($1,$2,$3)', [userId, wid, acquired]);
+      await db.query('INSERT INTO harem (user_id, waifu_id, acquired_date) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [userId, wid, acquired]);
     }
   }
 

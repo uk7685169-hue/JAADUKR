@@ -1,4 +1,4 @@
-const { db } = require('../db');
+const { query } = require('../db');
 
 class User {
     constructor(data = {}) {
@@ -19,25 +19,23 @@ class User {
     }
 
     async save() {
-        const stmt = db.prepare(`
-            INSERT INTO users (user_id, username, first_name, berries, gems, crimson, daily_streak, weekly_streak, last_daily_claim, last_weekly_claim, last_claim_date, favorite_waifu_id, harem_filter_rarity, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                username = excluded.username,
-                first_name = excluded.first_name,
-                berries = excluded.berries,
-                gems = excluded.gems,
-                crimson = excluded.crimson,
-                daily_streak = excluded.daily_streak,
-                weekly_streak = excluded.weekly_streak,
-                last_daily_claim = excluded.last_daily_claim,
-                last_weekly_claim = excluded.last_weekly_claim,
-                last_claim_date = excluded.last_claim_date,
-                favorite_waifu_id = excluded.favorite_waifu_id,
-                harem_filter_rarity = excluded.harem_filter_rarity
-        `);
+        const sql = `INSERT INTO users (user_id, username, first_name, berries, gems, crimson, daily_streak, weekly_streak, last_daily_claim, last_weekly_claim, last_claim_date, favorite_waifu_id, harem_filter_rarity, created_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+            ON CONFLICT (user_id) DO UPDATE SET
+                username = EXCLUDED.username,
+                first_name = EXCLUDED.first_name,
+                berries = EXCLUDED.berries,
+                gems = EXCLUDED.gems,
+                crimson = EXCLUDED.crimson,
+                daily_streak = EXCLUDED.daily_streak,
+                weekly_streak = EXCLUDED.weekly_streak,
+                last_daily_claim = EXCLUDED.last_daily_claim,
+                last_weekly_claim = EXCLUDED.last_weekly_claim,
+                last_claim_date = EXCLUDED.last_claim_date,
+                favorite_waifu_id = EXCLUDED.favorite_waifu_id,
+                harem_filter_rarity = EXCLUDED.harem_filter_rarity`;
 
-        stmt.run(
+        await query(sql, [
             this.user_id,
             this.username,
             this.first_name,
@@ -51,23 +49,23 @@ class User {
             this.last_claim_date,
             this.favorite_waifu_id,
             this.harem_filter_rarity,
-            this.created_at
-        );
+            this.created_at,
+        ]);
         return this;
     }
 
     static async findOne(filter = {}) {
         if (filter.user_id) {
-            const row = db.prepare('SELECT * FROM users WHERE user_id = ?').get(filter.user_id);
+            const res = await query('SELECT * FROM users WHERE user_id = $1 LIMIT 1', [filter.user_id]);
+            const row = res.rows[0];
             return row ? new User(row) : null;
         }
-        // Generic fallback: return null
         return null;
     }
 
     static async find(filter = {}) {
-        const rows = db.prepare('SELECT * FROM users').all();
-        return rows.map(r => new User(r));
+        const res = await query('SELECT * FROM users');
+        return res.rows.map(r => new User(r));
     }
 }
 
