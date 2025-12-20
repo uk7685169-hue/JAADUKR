@@ -1,11 +1,11 @@
 {
   "user_id": 6245574035,
-  "username": "ENDLES_ERA",
-  "first_name": "𝗧𝗛𝗘𝗚𝗔𝗠𝗘𝗥𝗔𝗗𝗘𝗣𝗧🫀🜲ᴀ×ᴡ 𓆩🖤𓆪",
-  "berries": 11547206,
-  "daily_streak": 3,
-  "weekly_streak": 2,
-  "favorite_waifu_id": 3,
+  "username": null,
+  "first_name": null,
+  "berries": 25865,
+  "daily_streak": 0,
+  "weekly_streak": 0,
+  "favorite_waifu_id": null,
   "waifus": [
     2,
     3,
@@ -30,5 +30,5 @@
     99,
     101
   ],
-  "last_updated": "2025-12-20T04:35:54.978Z"
+  "last_updated": "2025-12-20T06:31:03.302Z"
 }

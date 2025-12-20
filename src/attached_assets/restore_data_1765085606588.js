@@ -65,7 +65,7 @@ async function restoreFromBackup() {
         console.log('💕 Restoring harem...');
         for (const harem of backupData.harem) {
             await pool.query(
-                'INSERT INTO harem (user_id, waifu_id, acquired_date, owned_since) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, waifu_id) DO NOTHING',
+                'INSERT OR IGNORE INTO harem (user_id, waifu_id, acquired_date, owned_since) VALUES ($1, $2, $3, $4)',
                 [harem.user_id, harem.waifu_id, harem.acquired_date || harem.owned_since, harem.owned_since]
             );
         }
@@ -75,7 +75,7 @@ async function restoreFromBackup() {
         console.log('👑 Restoring roles...');
         for (const role of backupData.roles) {
             await pool.query(
-                'INSERT INTO roles (user_id, role_type) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+                'INSERT OR IGNORE INTO roles (user_id, role_type) VALUES ($1, $2)',
                 [role.user_id, role.role_type]
             );
         }

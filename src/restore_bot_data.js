@@ -46,22 +46,20 @@ async function importData() {
                 // Import harem data for this user
                 if (user.harem && user.harem.length > 0) {
                     for (const waifuId of user.harem) {
-                        await pool.query(`
-                            INSERT INTO harem (user_id, waifu_id, acquired_date, owned_since)
-                            VALUES ($1, $2, $3, $3)
-                            ON CONFLICT DO NOTHING
-                        `, [user.user_id, waifuId, new Date()]);
+                            await pool.query(`
+                                INSERT OR IGNORE INTO harem (user_id, waifu_id, acquired_date, owned_since)
+                                VALUES ($1, $2, $3, $3)
+                            `, [user.user_id, waifuId, new Date()]);
                     }
                 }
 
                 // Import roles for this user
                 if (user.roles && user.roles.length > 0) {
                     for (const role of user.roles) {
-                        await pool.query(`
-                            INSERT INTO roles (user_id, role_type)
-                            VALUES ($1, $2)
-                            ON CONFLICT DO NOTHING
-                        `, [user.user_id, role]);
+                            await pool.query(`
+                                INSERT OR IGNORE INTO roles (user_id, role_type)
+                                VALUES ($1, $2)
+                            `, [user.user_id, role]);
                     }
                 }
 
@@ -128,9 +126,8 @@ async function importData() {
                 for (const user of users) {
                     try {
                         await pool.query(`
-                            INSERT INTO roles (user_id, role_type)
+                            INSERT OR IGNORE INTO roles (user_id, role_type)
                             VALUES ($1, $2)
-                            ON CONFLICT DO NOTHING
                         `, [user.user_id, roleType]);
                     } catch (error) {
                         console.error(`❌ Error importing role ${roleType} for user ${user.user_id}:`, error.message);

@@ -43,7 +43,28 @@ function all(sql, params = []) {
 }
 
 async function query(sql, params = []) {
-    const converted = sql.replace(/\$\d+/g, '?');
+    // Normalize some Postgres-style SQL to SQLite-compatible SQL
+    let converted = sql.replace(/\$\d+/g, '?');
+
+    // Replace NOW() with SQLite datetime('now')
+    converted = converted.replace(/\bNOW\(\)/ig, "datetime('now')");
+
+    // Handle ON CONFLICT DO NOTHING / ON CONFLICT (cols) DO NOTHING and variants
+    // Convert to INSERT OR IGNORE by removing the conflict clause and adding OR IGNORE
+    const conflictDoNothingRegex = /ON\s+CONFLICT(?:\s*\([^)]*\))?\s+DO\s+NOTHING/ig;
+    if (conflictDoNothingRegex.test(converted)) {
+        converted = converted.replace(conflictDoNothingRegex, '');
+        // Change first INSERT INTO to INSERT OR IGNORE INTO
+        converted = converted.replace(/INSERT\s+INTO/i, 'INSERT OR IGNORE INTO');
+    }
+
+    // Some malformed variants like 'ON CONFLICT NOTHING' — remove them and use OR IGNORE
+    const conflictNothingRegex = /ON\s+CONFLICT\s+NOTHING/ig;
+    if (conflictNothingRegex.test(converted)) {
+        converted = converted.replace(conflictNothingRegex, '');
+        converted = converted.replace(/INSERT\s+INTO/i, 'INSERT OR IGNORE INTO');
+    }
+
     const trimmed = converted.trim().toUpperCase();
     if (trimmed.startsWith('SELECT')) {
         const rows = await all(converted, params);

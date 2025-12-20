@@ -1438,7 +1438,7 @@ bot.onText(/\/marry/, async (msg) => {
         return sendReply(msg.chat.id, msg.message_id, `${msg.from.first_name}, ʏᴏᴜʀ ᴍᴀʀʀɪᴀɢᴇ ᴘʀᴏᴘᴏꜱᴀʟ ᴡᴀꜱ ʀᴇᴊᴇᴄᴛᴇᴅ ᴀɴᴅ ꜱʜᴇ ʀᴀɴ ᴀᴡᴀʏ! 🤡`);
     }
 
-    await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, waifu.waifu_id]);
+    await pool.query('INSERT OR IGNORE INTO harem (user_id, waifu_id) VALUES ($1, $2)', [userId, waifu.waifu_id]);
     await saveUserDataToFile(userId);
     
     // Auto-save users data after marry
@@ -1999,7 +1999,7 @@ bot.onText(/\/adev(?:\s+(.+))?/, async (msg, match) => {
     // If no args and no reply, give dev to yourself
     if (!msg.reply_to_message && !match[1]) {
         await ensureUser(userId, msg.from.username, msg.from.first_name);
-        await pool.query('INSERT INTO roles (user_id, role_type) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, 'dev']);
+        await pool.query('INSERT OR IGNORE INTO roles (user_id, role_type) VALUES ($1, $2)', [userId, 'dev']);
         return sendReply(msg.chat.id, msg.message_id, '✅ You now have developer role!');
     }
 

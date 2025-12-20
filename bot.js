@@ -1,6 +1,6 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
-const express = require('express');
+// Note: no HTTP server - run as background worker on Render
 const fs = require('fs').promises;
 const path = require('path');
 const { db, pool } = require('./src/db-helpers.js');
@@ -30,9 +30,26 @@ if (!token) {
     // DO NOT EXIT - let Railway keep trying
 }
 
-const bot = new TelegramBot(token, {
-    polling: true
-});
+const disablePolling = (process.env.DISABLE_POLLING === 'true');
+let bot;
+if (token) {
+    if (disablePolling) {
+        console.warn('⚠️ DISABLE_POLLING=true — creating bot without polling. Use webhooks or a single polling instance.');
+        bot = new TelegramBot(token, { polling: false });
+    } else {
+        bot = new TelegramBot(token, { polling: true });
+    }
+} else {
+    console.error('⚠️ Bot token not found. Running in safe no-op mode.');
+    bot = {
+        on: () => {},
+        onText: () => {},
+        sendMessage: async () => null,
+        sendPhoto: async () => null,
+        getWebHookInfo: async () => ({}),
+        processUpdate: () => {}
+    };
+}
 // Wrap handler registration so async errors inside handlers don't crash the process
 function _wrapHandler(fn) {
     return function wrapped(...args) {
@@ -76,248 +93,31 @@ async function saveWaifusData() {
 }
 
 
-const app = express();
-const PORT = process.env.PORT || 5000;
-
-// Polling mode is set in bot initialization - no webhook
-
-app.get('/', (req, res) => {
-    res.send('Bot is running');
-});
-
-app.get('/health', async (req, res) => {
-    try {
-        res.setHeader('Cache-Control', 'no-cache');
-
-        // Check database connection
-        await pool.query('SELECT 1');
-
-        // Get webhook info
-        let webhookInfo = null;
-        try {
-            webhookInfo = await bot.getWebHookInfo();
-        } catch (e) {
-            console.error('Webhook info error:', e.message);
-        }
-
-        res.json({
-            status: 'online',
-            uptime: process.uptime(),
-            timestamp: new Date().toISOString(),
-            database: 'connected',
-            webhook: {
-                url: webhookInfo?.url || null,
-                pending_updates: webhookInfo?.pending_update_count || 0
-            },
-            environment: {
-                node_env: process.env.NODE_ENV,
-                use_webhook: process.env.USE_WEBHOOK,
-                webhook_url: process.env.WEBHOOK_URL ? 'set' : 'not set',
-                bot_token: process.env.TELEGRAM_BOT_TOKEN ? 'set' : 'not set'
-            }
-        });
-    } catch (error) {
-        res.status(500).json({
-            status: 'error',
-            error: error.message,
-            timestamp: new Date().toISOString()
-        });
-    }
-});
+// Running as a background worker (no HTTP server) to be Render-friendly.
+// Use `process.env.DATA_DIR` to configure a persistent directory for SQLite.
 
 // CRITICAL: Initialize all database tables on startup
 async function initializeDatabase() {
     try {
-        console.log('🔄 Initializing database tables...');
-        
-        // Users table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                username VARCHAR(255),
-                first_name VARCHAR(255),
-                berries INTEGER DEFAULT 50000,
-                gems INTEGER DEFAULT 0,
-                crimson INTEGER DEFAULT 0,
-                daily_streak INTEGER DEFAULT 0,
-                weekly_streak INTEGER DEFAULT 0,
-                last_daily_claim TIMESTAMP,
-                last_weekly_claim TIMESTAMP,
-                last_claim_date DATE,
-                favorite_waifu_id INTEGER,
-                harem_filter_rarity INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        
-        // Add crimson column if it doesn't exist (for existing databases)
-        await pool.query(`
-            DO $$ 
-            BEGIN 
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='crimson') THEN
-                    ALTER TABLE users ADD COLUMN crimson INTEGER DEFAULT 0;
-                END IF;
-            END $$;
-        `);
-        console.log('✅ Users table ready (with crimson column)');
-
-        // Waifus table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS waifus (
-                waifu_id SERIAL PRIMARY KEY,
-                name VARCHAR(255) NOT NULL,
-                anime VARCHAR(255) NOT NULL,
-                rarity INTEGER NOT NULL CHECK (rarity >= 1 AND rarity <= 16),
-                image_file_id TEXT,
-                price INTEGER DEFAULT 5000,
-                is_locked BOOLEAN DEFAULT FALSE,
-                uploaded_by BIGINT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ Waifus table ready');
-
-        // Harem table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS harem (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT REFERENCES users(user_id),
-                waifu_id INTEGER REFERENCES waifus(waifu_id),
-                acquired_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                owned_since TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ Harem table ready');
-
-        // Roles table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS roles (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT REFERENCES users(user_id),
-                role_type VARCHAR(50) NOT NULL,
-                UNIQUE (user_id, role_type)
-            )
-        `);
-        console.log('✅ Roles table ready');
-
-        // Group settings table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS group_settings (
-                group_id BIGINT PRIMARY KEY,
-                spawn_enabled BOOLEAN DEFAULT TRUE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ Group settings table ready');
-
-        // Spawn tracker table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS spawn_tracker (
-                group_id BIGINT PRIMARY KEY,
-                message_count INTEGER DEFAULT 0,
-                active_spawn_waifu_id INTEGER,
-                active_spawn_name VARCHAR(255),
-                bid_message_count INTEGER DEFAULT 0,
-                last_spawn TIMESTAMP
-            )
-        `);
-        console.log('✅ Spawn tracker table ready');
-
-        // Group bids table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS group_bids (
-                id SERIAL PRIMARY KEY,
-                group_id BIGINT,
-                waifu_id INTEGER REFERENCES waifus(waifu_id),
-                current_bid INTEGER DEFAULT 0,
-                current_bidder_id BIGINT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ Group bids table ready');
-
-        // Bazaar items table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS bazaar_items (
-                item_id SERIAL PRIMARY KEY,
-                waifu_id INTEGER REFERENCES waifus(waifu_id),
-                seller_id BIGINT REFERENCES users(user_id),
-                price INTEGER NOT NULL,
-                status VARCHAR(20) DEFAULT 'active',
-                listed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ Bazaar items table ready');
-
-        // Cooldowns table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS cooldowns (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                command VARCHAR(50),
-                last_used TIMESTAMP,
-                UNIQUE (user_id, command)
-            )
-        `);
-        console.log('✅ Cooldowns table ready');
-
-        // Spam blocks table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS spam_blocks (
-                user_id BIGINT PRIMARY KEY,
-                blocked_until TIMESTAMP
-            )
-        `);
-        console.log('✅ Spam blocks table ready');
-
-        // Banned users table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS banned_users (
-                user_id BIGINT PRIMARY KEY,
-                banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                reason TEXT
-            )
-        `);
-        console.log('✅ Banned users table ready');
-
-        // Bot settings table
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS bot_settings (
-                key VARCHAR(100) PRIMARY KEY,
-                value TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        console.log('✅ Bot settings table ready');
-
-        console.log('✅ All database tables initialized successfully!');
+        console.log('🔄 initializeDatabase() skipped in worker - SQLite initialized in src/db.js');
     } catch (error) {
-        console.error('❌ Database initialization error:', error);
-        // Don't exit - continue with partial initialization
+        console.error('❌ Database initialization stub error:', error);
     }
 }
 
 // CRITICAL: Clear spawn_tracker on bot startup to prevent race conditions
 async function initializeSpawnTracker() {
     try {
-        // Create redeem_codes table if not exists
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS redeem_codes (
-                code TEXT PRIMARY KEY,
-                code_type TEXT NOT NULL,
-                amount BIGINT,
-                waifu_id INT,
-                max_uses INT DEFAULT 1,
-                uses INT DEFAULT 0,
-                created_at TIMESTAMP DEFAULT datetime("now")
-            )
-        `);
-        console.log('✅ Redeem codes table ready');
-        
-        await pool.query('DELETE FROM spawn_tracker WHERE message_count >= 100 OR active_spawn_waifu_id IS NOT NULL');
-        console.log('✅ Spawn tracker cleared on startup');
+        // Use direct db (better-sqlite3) to safely clear spawn tracker
+        const { db: sqliteDb } = require('./src/db');
+        try {
+            sqliteDb.prepare('DELETE FROM spawn_tracker WHERE message_count >= 100 OR active_spawn_waifu_id IS NOT NULL').run();
+            console.log('✅ Spawn tracker cleared on startup (SQLite)');
+        } catch (e) {
+            console.warn('⚠️ spawn_tracker cleanup skipped or table missing:', e?.message || e);
+        }
     } catch (error) {
-        console.error('Error initializing spawn tracker:', error);
+        console.error('Error initializing spawn tracker (module load):', error);
     }
 }
 
@@ -337,6 +137,15 @@ async function initializeSpawnTracker() {
         if (guessBotModule && guessBotModule.startGuessBotPolling && !guessBotModule.usesMainToken) {
             await guessBotModule.startGuessBotPolling();
         }
+        // If the guess bot is configured to use the main bot token, attach handlers to the main bot instance
+        if (guessBotModule && guessBotModule.usesMainToken && typeof guessBotModule.setupGuessBotHandlers === 'function') {
+            try {
+                guessBotModule.setupGuessBotHandlers(bot);
+                console.log('✅ Guess bot handlers attached to main bot');
+            } catch (e) {
+                console.error('⚠️ Failed to attach guess bot handlers to main bot:', e?.message || e);
+            }
+        }
     } catch (error) {
         console.error('⚠️ Guess bot init failed (non-fatal):', error?.message || error);
     }
@@ -347,21 +156,45 @@ async function initializeSpawnTracker() {
     // DO NOT EXIT - Railway needs the service to stay alive
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🌐 Web server running on port ${PORT}`);
-    console.log(`✅ Bot is ready on Railway`);
-}).on('error', (err) => {
-    console.error('Server error:', err);
-    if (err.code === 'EADDRINUSE') {
-        console.error(`Port ${PORT} is already in use. Trying port 0...`);
-        app.listen(0, '0.0.0.0', () => {
-            console.log(`🌐 Web server running on alternative port`);
-        });
-    }
-});
+console.log('✅ Bot worker started (no HTTP server)');
 
 bot.on('polling_error', (error) => {
     console.error('❌ Polling error:', error);
+
+    // Common cause: 409 Conflict when another getUpdates session is active for the same token.
+    const msg = (error && (error.message || error.response?.description || '')).toString();
+    if (error && error.code === 'ETELEGRAM' && /terminated by other getUpdates request/i.test(msg)) {
+        console.error('⚠️ ETELEGRAM 409 conflict: another bot instance is polling with the same token.');
+        console.error('   Quick fixes:');
+        console.error('   - Ensure only one process uses polling for this token.');
+        console.error('   - Set DISABLE_POLLING=true in this environment and use webhooks or a separate token.');
+
+        // Stop polling to avoid tight error loops
+        try {
+            if (bot && typeof bot.stopPolling === 'function') {
+                bot.stopPolling();
+                console.log('🛑 Stopped polling due to 409 conflict');
+            }
+        } catch (e) {
+            console.error('Error stopping polling:', e?.message || e);
+        }
+
+        // Optional auto-retry if explicitly enabled
+        if (process.env.ENABLE_POLLING_RETRY === 'true' && !disablePolling) {
+            const retryMs = parseInt(process.env.POLLING_RETRY_MS || '60000', 10);
+            console.log(`⏱️ Polling retry scheduled in ${retryMs}ms (ENABLE_POLLING_RETRY=true)`);
+            setTimeout(() => {
+                try {
+                    if (bot && typeof bot.startPolling === 'function') {
+                        bot.startPolling();
+                        console.log('✅ Retried polling start');
+                    }
+                } catch (e) {
+                    console.error('Polling retry failed:', e?.message || e);
+                }
+            }, retryMs);
+        }
+    }
     // Continue running - do not exit
 });
 
@@ -811,16 +644,7 @@ bot.onText(/\/start/, async (msg) => {
         ]
     };
 
-    const welcomeText = `👋 ʜɪ, ᴍʏ ɴᴀᴍᴇ ɪs 𝗔𝗤𝗨𝗔 𝗪𝗔𝗜𝗙𝗨 𝗕𝗢𝗧, ᴀɴ ᴀɴɪᴍᴇ-ʙᴀsᴇᴅ ɢᴀᴍᴇs ʙᴏᴛ! ᴀᴅᴅ ᴍᴇ ᴛᴏ ʏᴏᴜʀ ɢʀᴏᴜᴘ ᴀɴᴅ ᴛʜᴇ ᴇxᴘᴇʀɪᴇɴᴄᴇ ɢᴇᴛs ᴇxᴘᴀɴᴅᴇᴅ. ʟᴇᴛ's ɪɴɪᴛɪᴀᴛᴇ ᴏᴜʀ ᴊᴏᴜʀɴᴇʏ ᴛᴏɢᴇᴛʜᴇʀ!
-
-sᴜᴘᴘᴏʀᴛ              ᴏғғɪᴄɪᴀʟ ɢʀᴏᴜᴘ
-
-ᴏᴡɴᴇʀ                 ғᴏᴜɴᴅᴇʀ
-
-
-
-OWNER - 6245574035 & 8195158525
-FOUNDER - 6245574035`;
+    const welcomeText = `👋 ʜɪ, ᴍʏ ɴᴀᴍᴇ ɪs 𝗔𝗤𝗨𝗔 𝗪𝗔𝗜𝗙𝗨 𝗕𝗢𝗧 , ᴀɴ ᴀɴɪᴍᴇ-ʙᴀ𝘀ᴇᴅ ɢᴀᴍᴇ𝘀 ʙᴏᴛ! ᴀᴅᴅ ᴍᴇ ᴛᴏ ʏᴏᴜʀ ɢʀᴏᴜᴘ ᴀɴᴅ ᴛʜᴇ ᴇ𝘅ᴘᴇʀɪᴇɴᴄᴇ ɢᴇᴛs ᴇxᴘᴀɴᴅᴇᴅ. ʟᴇᴛ'𝘀 ɪɴɪᴛɪᴀᴛᴇ ᴏᴜʀ ᴊᴏᴜʀɴᴇʏ ᴛᴏɢᴇᴛʜᴇʀ!`;
 
     try {
         // Get random media from start_media table
@@ -854,6 +678,32 @@ FOUNDER - 6245574035`;
         }
     } catch (error) {
         await sendReply(msg.chat.id, msg.message_id, welcomeText, { reply_markup: mainMenuKeyboard });
+    }
+});
+
+// Convert crimson to gems: 1000 crimson => 1 gem
+bot.onText(/\/convert\s+(\d+)/, async (msg, match) => {
+    if (!await checkUserAccess(msg)) return;
+    const userId = msg.from.id;
+    const amount = parseInt(match[1]);
+    if (!amount || amount <= 0) return sendReply(msg.chat.id, msg.message_id, '❌ Usage: /convert <amount_of_crimson>');
+
+    try {
+        const userRow = await pool.query('SELECT crimson, gems FROM users WHERE user_id = $1', [userId]);
+        if (userRow.rows.length === 0) return sendReply(msg.chat.id, msg.message_id, '❌ You are not registered. Use /start in DM first.');
+        const current = userRow.rows[0];
+        if ((current.crimson || 0) < amount) return sendReply(msg.chat.id, msg.message_id, '❌ You do not have enough crimson.');
+
+        const gemsToAdd = Math.floor(amount / 1000);
+        if (gemsToAdd <= 0) return sendReply(msg.chat.id, msg.message_id, '❌ Minimum conversion is 1000 crimson for 1 gem.');
+
+        const crimsonConsumed = gemsToAdd * 1000;
+        await pool.query('UPDATE users SET crimson = crimson - $1, gems = COALESCE(gems,0) + $2 WHERE user_id = $3', [crimsonConsumed, gemsToAdd, userId]);
+        await saveUserDataToFile(userId);
+        return sendReply(msg.chat.id, msg.message_id, `✅ Converted ${crimsonConsumed} crimson → +${gemsToAdd} 💎 Gems`);
+    } catch (e) {
+        console.error('Convert error:', e);
+        return sendReply(msg.chat.id, msg.message_id, '❌ Conversion failed. Try again later.');
     }
 });
 
@@ -3807,22 +3657,43 @@ bot.onText(/\/propose(?:\s+(\d+))?/, async (msg, match) => {
         return sendReply(msg.chat.id, msg.message_id, `❌ This waifu is already married!`);
     }
 
-    // Check if user has enough currency (25k for proposal)
-    const PROPOSAL_COST = 25000;
+    // New proposal rules: cost 20,000 cash, success 40%, cooldown 5 minutes
+    const PROPOSAL_COST = 20000;
+    const SUCCESS_RATE = 0.40;
+    const COOLDOWN_MS = 5 * 60 * 1000;
+
+    // Only allow waifus with Manga or Royal rarity (8 and 9)
+    if (![8,9].includes(parseInt(waifu.rarity))) {
+        return sendReply(msg.chat.id, msg.message_id, '❌ Proposals can only be attempted on Manga or Royal rarity waifus.');
+    }
+
+    // Check cooldown
+    const cdRow = await pool.query('SELECT last_used FROM cooldowns WHERE user_id = $1 AND command = $2', [userId, 'propose']).catch(() => ({ rows: [] }));
+    if (cdRow.rows.length > 0 && cdRow.rows[0].last_used) {
+        const last = new Date(cdRow.rows[0].last_used).getTime();
+        const now = Date.now();
+        if (now - last < COOLDOWN_MS) {
+            const wait = Math.ceil((COOLDOWN_MS - (now - last)) / 1000);
+            return sendReply(msg.chat.id, msg.message_id, `⏳ Please wait ${wait}s before proposing again.`);
+        }
+    }
+
     if (user.berries < PROPOSAL_COST) {
         return sendReply(msg.chat.id, msg.message_id, `❌ You need ${PROPOSAL_COST} 💸 to propose\n\nYou have: ${user.berries} 💸`);
     }
 
-    // 70% success rate
-    const success = Math.random() < 0.70;
+    const success = Math.random() < SUCCESS_RATE;
 
     if (!success) {
+        // record cooldown even on failure
+        await pool.query('INSERT INTO cooldowns (user_id, command, last_used) VALUES ($1, $2, datetime("now")) ON CONFLICT (user_id, command) DO UPDATE SET last_used = datetime("now")', [userId, 'propose']).catch(() => {});
         return sendReply(msg.chat.id, msg.message_id, `💔 𝗣𝗥𝗢𝗣𝗢𝗦𝗔𝗟 𝗥𝗘𝗝𝗘𝗖𝗧𝗘𝗗!\n\n${waifu.name} rejected your proposal... Try again later!`);
     }
 
-    // Deduct cost and add waifu to harem
+    // Deduct cost and add waifu to harem, update cooldown
     await pool.query('UPDATE users SET berries = berries - $1 WHERE user_id = $2', [PROPOSAL_COST, userId]);
     await pool.query('INSERT INTO harem (user_id, waifu_id) VALUES ($1, $2) ON CONFLICT NOTHING', [userId, waifuId]);
+    await pool.query('INSERT INTO cooldowns (user_id, command, last_used) VALUES ($1, $2, datetime("now")) ON CONFLICT (user_id, command) DO UPDATE SET last_used = datetime("now")', [userId, 'propose']).catch(() => {});
     await saveUserDataToFile(userId);
 
     const message = `💍 𝗣𝗥𝗢𝗣𝗢𝗦𝗔𝗟 𝗔𝗖𝗖𝗘𝗣𝗧𝗘𝗗!\n\n✨ You successfully proposed to ${waifu.name}!\n💸 Cost: -${PROPOSAL_COST} 💸\n\n💝 Congratulations on your marriage! 🎉`;
@@ -4713,33 +4584,7 @@ bot.on('callback_query', async (query) => {
     }
 });
 
-// ==================== CONVERT COMMAND (1000 crimson = 1 gem) ====================
-bot.onText(/\/convert(?:\s+(\d+))?/, async (msg, match) => {
-    if (!await checkUserAccess(msg)) return;
-
-    const userId = msg.from.id;
-    const amount = parseInt(match[1]) || 1;
-    const crimsonNeeded = amount * 1000;
-
-    try {
-        await ensureUser(userId, msg.from.username, msg.from.first_name);
-        
-        const user = await pool.query('SELECT crimson FROM users WHERE user_id = $1', [userId]);
-        const currentCrimson = user.rows[0]?.crimson || 0;
-        
-        if (currentCrimson < crimsonNeeded) {
-            return sendReply(msg.chat.id, msg.message_id, `❌ You need ${crimsonNeeded.toLocaleString()} 🩸 crimson to convert ${amount} 💎 gems!\n\nYou have: ${currentCrimson.toLocaleString()} 🩸 crimson`);
-        }
-        
-        await pool.query('UPDATE users SET crimson = crimson - $1, gems = gems + $2 WHERE user_id = $3', [crimsonNeeded, amount, userId]);
-        await saveUserDataToFile(userId);
-        
-        sendReply(msg.chat.id, msg.message_id, `✅ <b>Conversion Successful!</b>\n\n🩸 ${crimsonNeeded.toLocaleString()} crimson → 💎 ${amount} gems\n\n💡 Rate: 1000 crimson = 1 gem`);
-    } catch (error) {
-        console.error('Error in /convert command:', error);
-        sendReply(msg.chat.id, msg.message_id, '❌ Error converting crimson. Please try again!');
-    }
-});
+// (Duplicate /convert handler removed — single top-level /convert handler remains earlier in file)
 
 // ==================== GIVE GEMS COMMAND (Owner/Dev only) ====================
 bot.onText(/\/give_gems(?:\s+(.+))?/, async (msg, match) => {
