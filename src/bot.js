@@ -1,6 +1,8 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
-const { Pool } = require('pg');
+const { pool } = require('./db-helpers');
+// Ensure SQLite DB and tables are initialized (db.js runs initialization on require)
+require('./db');
 const express = require('express');
 const fs = require('fs').promises;
 const path = require('path');
@@ -56,19 +58,8 @@ bot.on = (event, handler) => _origOn(event, _wrapHandler(handler));
 const _origOnText = bot.onText.bind(bot);
 bot.onText = (regex, handler) => _origOnText(regex, _wrapHandler(handler));
 
-// Make Postgres optional so bot can run without it. Provide a safe stub when missing.
-let pool = null;
-if (process.env.DATABASE_URL) {
-    try {
-        pool = new Pool({ connectionString: process.env.DATABASE_URL });
-    } catch (err) {
-        console.error('Error creating Postgres pool:', err && err.message ? err.message : err);
-        pool = { query: async () => ({ rows: [] }), on: () => {} };
-    }
-} else {
-    console.warn('DATABASE_URL not set — running without Postgres. Using safe stub.');
-    pool = { query: async () => ({ rows: [] }), on: () => {} };
-}
+// Use SQLite compatibility pool from src/db-helpers
+// `pool` is the compatibility object that exposes `query(sql, params)` returning Promises
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -417,9 +408,8 @@ async function initializeSpawnTracker() {
 }
 
 // Run initialization before server starts
-initializeDatabase().then(() => {
-    return initializeSpawnTracker();
-}).then(() => {
+// SQLite initialization already performed by require('./db') above.
+initializeSpawnTracker().then(() => {
     console.log('✅ Database initialization complete');
     // Setup webhook after database is ready
     return setupWebhook();
@@ -493,11 +483,12 @@ process.on('uncaughtException', (error) => {
     // DO NOT EXIT - keep running forever
 });
 
-// ADDITIONAL SAFETY: catch pool errors
-pool.on('error', (err, client) => {
-    console.error('❌ [POOL ERROR]', err.message);
-    // Keep running
-});
+// ADDITIONAL SAFETY: catch pool errors if supported
+if (pool && typeof pool.on === 'function') {
+    pool.on('error', (err, client) => {
+        console.error('❌ [POOL ERROR]', err && err.message ? err.message : err);
+    });
+}
 
 const USER_DATA_DIR = './users';
 
@@ -672,21 +663,32 @@ setInterval(checkMonthlyReset, 60 * 60 * 1000);
 checkMonthlyReset();
 
 async function ensureUser(userId, username, firstName) {
-    // Ensure gems column exists
-    await pool.query(`
-        DO $$ BEGIN
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='gems') THEN
-                ALTER TABLE users ADD COLUMN gems INT DEFAULT 0;
-            END IF;
-        END $$;
-    `).catch(() => {});
+    // Ensure gems column exists (SQLite safe attempt)
+    try {
+        await pool.query('ALTER TABLE users ADD COLUMN gems INTEGER DEFAULT 0');
+    } catch (e) {
+        // Column probably exists - ignore
+    }
     
-    const result = await pool.query(
-        'INSERT INTO users (user_id, username, first_name) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO UPDATE SET username = $2, first_name = $3 RETURNING *',
-        [userId, username, firstName]
-    );
+    // Perform upsert then SELECT the user row (avoids RETURNING compatibility issues)
+    try {
+        await pool.query(
+            'INSERT INTO users (user_id, username, first_name) VALUES ($1, $2, $3) ON CONFLICT(user_id) DO UPDATE SET username = $2, first_name = $3',
+            [userId, username, firstName]
+        );
+    } catch (e) {
+        // Fallback: try simple insert or update
+        try {
+            await pool.query('INSERT OR IGNORE INTO users (user_id, username, first_name, berries, gems) VALUES ($1, $2, $3, 50000, 0)', [userId, username, firstName]);
+            await pool.query('UPDATE users SET username = $2, first_name = $3 WHERE user_id = $1', [userId, username, firstName]);
+        } catch (e2) {
+            console.error('[ensureUser] upsert fallback failed:', e2.message);
+        }
+    }
+
+    const sel = await pool.query('SELECT * FROM users WHERE user_id = $1', [userId]);
     await saveUserDataToFile(userId);
-    return result.rows[0];
+    return sel.rows[0];
 }
 
 async function checkBanned(userId) {
@@ -695,12 +697,12 @@ async function checkBanned(userId) {
 }
 
 async function checkSpamBlock(userId) {
-    const result = await pool.query('SELECT * FROM spam_blocks WHERE user_id = $1 AND blocked_until > NOW()', [userId]);
+    const result = await pool.query('SELECT * FROM spam_blocks WHERE user_id = $1 AND blocked_until > CURRENT_TIMESTAMP', [userId]);
     if (result.rows.length > 0) {
         return result.rows[0].blocked_until;
     }
 
-    await pool.query('DELETE FROM spam_blocks WHERE user_id = $1 AND blocked_until <= NOW()', [userId]);
+    await pool.query('DELETE FROM spam_blocks WHERE user_id = $1 AND blocked_until <= CURRENT_TIMESTAMP', [userId]);
     return null;
 }
 
@@ -722,14 +724,14 @@ async function trackSpam(userId) {
             const blockUntil = new Date(now + SPAM_BLOCK_DURATION);
             try {
                 await pool.query(
-                    'INSERT INTO spam_blocks (user_id, blocked_until, spam_count) VALUES ($1, $2, 1) ON CONFLICT (user_id) DO UPDATE SET blocked_until = $2, spam_count = spam_blocks.spam_count + 1',
+                    'INSERT INTO spam_blocks (user_id, blocked_until) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET blocked_until = excluded.blocked_until',
                     [userId, blockUntil]
                 );
             } catch (dbErr) {
                 // If constraint fails, try simple insert
                 try {
                     await pool.query('DELETE FROM spam_blocks WHERE user_id = $1', [userId]);
-                    await pool.query('INSERT INTO spam_blocks (user_id, blocked_until, spam_count) VALUES ($1, $2, 1)', [userId, blockUntil]);
+                    await pool.query('INSERT INTO spam_blocks (user_id, blocked_until) VALUES ($1, $2)', [userId, blockUntil]);
                 } catch (e) {
                     console.error('[trackSpam] DB error (non-fatal):', e.message);
                 }
@@ -764,14 +766,14 @@ async function checkCooldown(userId, command, cooldownSeconds) {
         
         try {
             await pool.query(
-                'INSERT INTO cooldowns (user_id, command, last_used) VALUES ($1, $2, NOW()) ON CONFLICT (user_id, command) DO UPDATE SET last_used = NOW()',
+                'INSERT INTO cooldowns (user_id, command, last_used) VALUES ($1, $2, CURRENT_TIMESTAMP) ON CONFLICT (user_id, command) DO UPDATE SET last_used = CURRENT_TIMESTAMP',
                 [userId, command]
             );
         } catch (dbErr) {
             // If constraint fails, try upsert alternative
             try {
                 await pool.query('DELETE FROM cooldowns WHERE user_id = $1 AND command = $2', [userId, command]);
-                await pool.query('INSERT INTO cooldowns (user_id, command, last_used) VALUES ($1, $2, NOW())', [userId, command]);
+                await pool.query('INSERT INTO cooldowns (user_id, command, last_used) VALUES ($1, $2, CURRENT_TIMESTAMP)', [userId, command]);
             } catch (e) {
                 console.error('[checkCooldown] DB error (non-fatal):', e.message);
             }
@@ -1241,6 +1243,39 @@ bot.on('callback_query', async (query) => {
                 parse_mode: 'HTML',
                 reply_markup: keyboard
             });
+        } else if (data === 'top_groups') {
+            try {
+                const topGroups = await pool.query(`
+                    SELECT g.group_id, g.group_name, SUM(u.berries) as total_cash, COUNT(DISTINCT u.user_id) as member_count
+                    FROM group_settings g
+                    LEFT JOIN users u ON u.user_id IN (
+                        SELECT DISTINCT user_id FROM harem WHERE user_id IN (
+                            SELECT user_id FROM users WHERE user_id > 0
+                        )
+                    )
+                    GROUP BY g.group_id, g.group_name
+                    ORDER BY total_cash DESC
+                    LIMIT 10
+                `);
+
+                let message = '💰 <b>Top 10 Richest Groups</b>\n\n';
+                if (topGroups.rows.length === 0) {
+                    message += 'No group data available yet!';
+                } else {
+                    topGroups.rows.forEach((group, i) => {
+                        const name = group.group_name || `Group ${group.group_id}`;
+                        const cash = group.total_cash || 0;
+                        const members = group.member_count || 0;
+                        message += `${i + 1}. ${name}\n   💸 ${cash.toLocaleString()} | 👥 ${members} members\n\n`;
+                    });
+                }
+
+                const keyboard = { inline_keyboard: [[{ text: '« CLOSE', callback_data: 'delete_message' }]] };
+                await bot.editMessageText(message, { chat_id: chatId, message_id: messageId, parse_mode: 'HTML', reply_markup: keyboard });
+            } catch (err) {
+                console.error('Error in top_groups callback:', err);
+                await bot.answerCallbackQuery(query.id);
+            }
         } else if (data === 'delete_message') {
             await bot.deleteMessage(chatId, messageId);
         } else if (data.startsWith('show_char_')) {
@@ -1341,7 +1376,7 @@ bot.onText(/\/daily/, async (msg) => {
     const streak = (!lastDaily || (now - lastDaily) / (1000 * 60 * 60 * 48) < 1) ? user.daily_streak + 1 : 1;
     let dailyReward = 50000;
 
-    await pool.query('UPDATE users SET berries = berries + $1, daily_streak = $2, last_daily_claim = NOW() WHERE user_id = $3', 
+    await pool.query('UPDATE users SET berries = berries + $1, daily_streak = $2, last_daily_claim = CURRENT_TIMESTAMP WHERE user_id = $3', 
         [dailyReward, streak, userId]);
     await saveUserDataToFile(userId);
 
@@ -1366,7 +1401,7 @@ bot.onText(/\/weekly/, async (msg) => {
     const streak = (!lastWeekly || (now - lastWeekly) / (1000 * 60 * 60 * 24 * 14) < 1) ? user.weekly_streak + 1 : 1;
     let weeklyReward = 3000000;
 
-    await pool.query('UPDATE users SET berries = berries + $1, weekly_streak = $2, last_weekly_claim = NOW() WHERE user_id = $3', 
+    await pool.query('UPDATE users SET berries = berries + $1, weekly_streak = $2, last_weekly_claim = CURRENT_TIMESTAMP WHERE user_id = $3', 
         [weeklyReward, streak, userId]);
     await saveUserDataToFile(userId);
 
@@ -1459,7 +1494,7 @@ bot.onText(/\/top/, async (msg) => {
     const keyboard = {
         inline_keyboard: [
             [{ text: '💸 ᴄᴀꜱʜ', callback_data: 'top_cash' }, { text: '🩷 ᴡᴀɪғᴜs', callback_data: 'top_waifus' }],
-            [{ text: '💎 ɢᴇᴍs', callback_data: 'top_gems' }]
+            [{ text: '💎 ɢᴇᴍs', callback_data: 'top_gems' }, { text: '🌐 GROUPS', callback_data: 'top_groups' }]
         ]
     };
 
@@ -2062,12 +2097,11 @@ bot.onText(/\/rdev(?:\s+(.+))?/, async (msg, match) => {
         return sendReply(msg.chat.id, msg.message_id, '❌ Reply to a user or use: /rdev @username or /rdev [user_id]');
     }
 
-    const result = await pool.query("DELETE FROM roles WHERE user_id = $1 AND role_type = 'dev' RETURNING *", [targetId]);
-
-    if (result.rowCount === 0) {
+    const check = await pool.query("SELECT * FROM roles WHERE user_id = $1 AND role_type = 'dev'", [targetId]);
+    if (check.rows.length === 0) {
         return sendReply(msg.chat.id, msg.message_id, `❌ ${targetName} is not a developer!`);
     }
-
+    await pool.query("DELETE FROM roles WHERE user_id = $1 AND role_type = 'dev'", [targetId]);
     sendReply(msg.chat.id, msg.message_id, `✅ Removed developer role from ${targetName}!`);
 });
 
@@ -2099,12 +2133,11 @@ bot.onText(/\/reset_waifu\s+(.+)/, async (msg, match) => {
             return sendReply(msg.chat.id, msg.message_id, '❌ Reply to a user or provide username/ID!');
         }
 
-        const result = await pool.query('DELETE FROM harem WHERE user_id = $1 AND waifu_id = $2 RETURNING *', [target.targetId, waifuId]);
-
-        if (result.rowCount === 0) {
+        const check = await pool.query('SELECT * FROM harem WHERE user_id = $1 AND waifu_id = $2', [target.targetId, waifuId]);
+        if (check.rows.length === 0) {
             return sendReply(msg.chat.id, msg.message_id, '❌ User does not own this waifu!');
         }
-
+        await pool.query('DELETE FROM harem WHERE user_id = $1 AND waifu_id = $2', [target.targetId, waifuId]);
         await saveUserDataToFile(target.targetId);
         sendReply(msg.chat.id, msg.message_id, `✅ Waifu ID ${waifuId} removed from ${target.targetName}!`);
     }
@@ -2240,12 +2273,11 @@ bot.onText(/\/gunban\s+(.+)/, async (msg, match) => {
         return sendReply(msg.chat.id, msg.message_id, '❌ Reply to a user or provide username/ID!');
     }
 
-    const result = await pool.query('DELETE FROM banned_users WHERE user_id = $1 RETURNING *', [target.targetId]);
-
-    if (result.rowCount === 0) {
+    const check = await pool.query('SELECT user_id FROM banned_users WHERE user_id = $1', [target.targetId]);
+    if (check.rows.length === 0) {
         return sendReply(msg.chat.id, msg.message_id, '❌ User is not banned!');
     }
-
+    await pool.query('DELETE FROM banned_users WHERE user_id = $1', [target.targetId]);
     sendReply(msg.chat.id, msg.message_id, `✅ ${target.targetName} has been unbanned!`);
 });
 
@@ -2639,12 +2671,19 @@ bot.onText(/\/upload/, async (msg) => {
         console.log(`[UPLOAD] Inserting waifu: ${name}, ${anime}, rarity ${rarity}`);
 
         const result = await pool.query(
-            'INSERT INTO waifus (name, anime, rarity, image_file_id, price, uploaded_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING waifu_id',
+            'INSERT INTO waifus (name, anime, rarity, image_file_id, price, uploaded_by) VALUES ($1, $2, $3, $4, $5, $6)',
             [name, anime, rarity, fileId, price, userId]
         );
 
-        const waifuId = result.rows[0].waifu_id;
-        const uploadCaption = `Name: ${name}\nAnime: ${anime}\nRarity: ${RARITY_NAMES[rarity]}\nID: ${waifuId}\nPrice: ${price} 💸\nUploaded by: ${msg.from.first_name}`;
+        // Prefer returned row if available, otherwise use lastID
+        const waifuId = (result.rows && result.rows[0] && (result.rows[0].waifu_id || result.rows[0].id)) ? (result.rows[0].waifu_id || result.rows[0].id) : result.lastID;
+        // If lastID not provided (rare), try to fetch by unique combination
+        let finalWaifuId = waifuId;
+        if (!finalWaifuId) {
+            const sel = await pool.query('SELECT waifu_id FROM waifus WHERE name = $1 AND anime = $2 AND image_file_id = $3 ORDER BY waifu_id DESC LIMIT 1', [name, anime, fileId]);
+            finalWaifuId = sel.rows[0] && sel.rows[0].waifu_id;
+        }
+        const uploadCaption = `Name: ${name}\nAnime: ${anime}\nRarity: ${RARITY_NAMES[rarity]}\nID: ${finalWaifuId}\nPrice: ${price} 💸\nUploaded by: ${msg.from.first_name}`;
         const notificationCaption = `⚠️ 𝗧𝗛𝗜𝗦 𝗪𝗔𝗜𝗙𝗨 𝗛𝗔𝗦 𝗕𝗘𝗘𝗡 𝗨𝗣𝗟𝗢𝗔𝗗𝗘𝗗, 𝗡𝗢 𝗢𝗡𝗘 𝗦𝗛𝗢𝗨𝗟𝗗 𝗨𝗣𝗟𝗢𝗔𝗗 𝗜𝗧 𝗡𝗢𝗪.`;
 
         // Post to upload notification group (database channel)
@@ -2695,7 +2734,7 @@ bot.onText(/\/upload/, async (msg) => {
             }
         }
 
-        const successCaption = `✅ <b>Waifu Successfully Added to Collection!</b>\n\n𝗡𝗔𝗠𝗘: ${name}\n𝗔𝗡𝗜𝗠𝗘: ${anime}\n𝗥𝗔𝗥𝗜𝗧𝗬: ${RARITY_NAMES[rarity]}\n𝗜𝗗: ${waifuId}\n𝗣𝗥𝗜𝗖𝗘: ${price}💸`;
+        const successCaption = `✅ <b>Waifu Successfully Added to Collection!</b>\n\n𝗡𝗔𝗠𝗘: ${name}\n𝗔𝗡𝗜𝗠𝗘: ${anime}\n𝗥𝗔𝗥𝗜𝗧𝗬: ${RARITY_NAMES[rarity]}\n𝗜𝗗: ${finalWaifuId}\n𝗣𝗥𝗜𝗖𝗘: ${price}💸`;
 
         // Auto-save waifus and bot data after upload
         saveWaifusData().catch(console.error);
@@ -2880,7 +2919,7 @@ async function sendBroadcastMessage(chatId, replyMsg, maxRetries = 3) {
 const startMediaList = [];
 
 // /uploaddp command - Upload media for /start command
-bot.onText(/\/uploaddp/, async (msg) => {
+bot.onText(/\/uploaddp/i, async (msg) => {
     const userId = msg.from.id;
 
     if (!await hasRole(userId, 'dev') && userId !== OWNER_ID) {
@@ -3036,7 +3075,7 @@ bot.onText(/\/send/, async (msg) => {
     if (failCount > 0) {
         resultMsg += `\n❌ Failed: ${failCount}`;
     }
-    
+            const welcomeText = `👋 ʜɪ, ᴍʏ ɴᴀᴍᴇ ɪs 𝗔𝗤𝗨𝗔 𝗪𝗔𝗜𝗙𝗨 𝗕𝗢𝗧, ᴀɴ ᴀɴɪᴍᴇ-ʙᴀsᴇᴅ ɢᴀᴍᴇs ʙᴏᴛ! ᴀᴅᴅ ᴍᴇ ᴛᴏ ʏᴏᴜʀ ɢʀᴏᴜᴘ ᴀɴᴅ ᴛʜᴇ ᴇxᴘᴇʀɪᴇɴᴄᴇ ɢᴇᴛs ᴇxᴘᴀɴᴅᴇᴅ. ʟᴇᴛ's ɪɴɪᴛɪᴀᴛᴇ ᴏᴜʀ ᴊᴏᴜʀɴᴇʏ ᴛᴏɢᴇᴛʜᴇʀ!
     sendReply(msg.chat.id, msg.message_id, resultMsg);
 });
 
@@ -3427,12 +3466,11 @@ bot.onText(/\/delcode\s+(.+)/, async (msg, match) => {
 
     const code = match[1].trim().toUpperCase();
 
-    const result = await pool.query('DELETE FROM redeem_codes WHERE code = $1 RETURNING *', [code]);
-
-    if (result.rowCount === 0) {
+    const check = await pool.query('SELECT code FROM redeem_codes WHERE code = $1', [code]);
+    if (check.rows.length === 0) {
         return sendReply(msg.chat.id, msg.message_id, '❌ Code not found!');
     }
-
+    await pool.query('DELETE FROM redeem_codes WHERE code = $1', [code]);
     sendReply(msg.chat.id, msg.message_id, `✅ Deleted redeem code: <code>${code}</code>`);
 });
 
@@ -3764,13 +3802,19 @@ bot.on("message", async (msg) => { try {
     if (!activeSpawn && currentCount >= 100) {
         // CRITICAL: Use transaction to prevent race condition (16 waifus bug)
         // Only ONE spawn per 100 messages - STRICTLY enforce with database lock
-        const result = await pool.query(
-            'UPDATE spawn_tracker SET active_spawn_waifu_id = -999, message_count = 0 WHERE group_id = $1 AND active_spawn_waifu_id IS NULL AND message_count >= 100 RETURNING *',
-            [groupId]
-        );
+        // Attempt to lock spawn tracker row for this group (SELECT -> UPDATE)
+        const lockCheck = await pool.query('SELECT active_spawn_waifu_id, message_count FROM spawn_tracker WHERE group_id = $1', [groupId]);
+        if (lockCheck.rows.length > 0 && (lockCheck.rows[0].active_spawn_waifu_id === null || lockCheck.rows[0].active_spawn_waifu_id === undefined) && lockCheck.rows[0].message_count >= 100) {
+            await pool.query('UPDATE spawn_tracker SET active_spawn_waifu_id = -999, message_count = 0 WHERE group_id = $1', [groupId]);
+
+            // Only spawn if we successfully locked the group
+            // proceed below
+        } else {
+            return; // nothing to do
+        }
         
-        // Only spawn if we successfully locked the group (exactly 1 update)
-        if (result.rows.length > 0) {
+        // proceed to spawn
+        {
             const waifu = await getRandomWaifu([1, 13]);
 
             if (waifu) {
@@ -3965,8 +4009,8 @@ bot.onText(/\/dprofile/, async (msg) => {
     message += `◈𝗖𝗔𝗦𝗛: 💸 ${user.berries}\n`;
     message += `┣━━━━━━━━━━━━━⧫\n`;
     message += `◈𝗖𝗛𝗔𝗥𝗔𝗖𝗧𝗘𝗥𝗦: ${total}\n`;
-    message += `◈𝗙𝗔𝗩𝗢𝗥𝗜𝗧𝗘𝗦: ${favorites}\n`;
     message += `┗━━━━━━━━━━━━━⧫`;
+            const welcomeText = `👋 ʜɪ, ᴍʏ ɴᴀᴍᴇ ɪs 𝗔𝗤𝗨𝗔 𝗪𝗔𝗜𝗙𝗨 𝗕𝗢𝗧, ᴀɴ ᴀɴɪᴍᴇ-ʙᴀsᴇᴅ ɢᴀᴍᴇs ʙᴏᴛ! ᴀᴅᴅ ᴍᴇ ᴛᴏ ʏᴏᴜʀ ɢʀᴏᴜᴘ ᴀɴᴅ ᴛʜᴇ ᴇxᴘᴇʀɪᴇɴᴄᴇ ɢᴇᴛs ᴇxᴘᴀɴᴅᴇᴅ. ʟᴇᴛ's ɪɴɪᴛɪᴀᴛᴇ ᴏᴜʀ ᴊᴏᴜʀɴᴇʏ ᴛᴏɢᴇᴛʜᴇʀ!
 
     try {
         const photos = await bot.getUserProfilePhotos(userId, { limit: 1 });
@@ -5014,12 +5058,11 @@ bot.onText(/\/delreward\s+\/(\w+)/i, async (msg, match) => {
     const trigger = match[1].toLowerCase();
 
     try {
-        const result = await pool.query('DELETE FROM custom_commands WHERE command_trigger = $1 RETURNING *', [trigger]);
-        
-        if (result.rows.length === 0) {
+        const check = await pool.query('SELECT command_trigger FROM custom_commands WHERE command_trigger = $1', [trigger]);
+        if (check.rows.length === 0) {
             return sendReply(msg.chat.id, msg.message_id, `❌ Reward command /${trigger} not found!`);
         }
-
+        await pool.query('DELETE FROM custom_commands WHERE command_trigger = $1', [trigger]);
         sendReply(msg.chat.id, msg.message_id, `✅ Reward command /${trigger} deleted!`);
     } catch (error) {
         console.error('Error deleting reward command:', error);
@@ -5159,12 +5202,11 @@ bot.onText(/\/delcmd\s+\/(\w+)/, async (msg, match) => {
     const commandName = match[1].toLowerCase();
 
     try {
-        const result = await pool.query('DELETE FROM dynamic_commands WHERE command_name = $1 RETURNING *', [commandName]);
-        
-        if (result.rows.length === 0) {
+        const check = await pool.query('SELECT command_name FROM dynamic_commands WHERE command_name = $1', [commandName]);
+        if (check.rows.length === 0) {
             return sendReply(msg.chat.id, msg.message_id, `❌ Command /${commandName} not found!`);
         }
-
+        await pool.query('DELETE FROM dynamic_commands WHERE command_name = $1', [commandName]);
         sendReply(msg.chat.id, msg.message_id, `✅ Command /${commandName} deleted!`);
     } catch (error) {
         console.error('Error deleting dynamic command:', error);
