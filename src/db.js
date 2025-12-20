@@ -1,4 +1,6 @@
 const sqlite3 = require('sqlite3').verbose();
+const fs = require('fs');
+const path = require('path');
 const DB_PATH = process.env.DB_PATH || '/tmp/waifu.db';
 
 let dbInstance = null;
@@ -6,6 +8,13 @@ let _ready = null;
 
 function open() {
     return new Promise((resolve, reject) => {
+        try {
+            const dir = path.dirname(DB_PATH);
+            if (dir) fs.mkdirSync(dir, { recursive: true });
+        } catch (e) {
+            console.warn('Could not ensure DB directory exists:', e && e.message ? e.message : e);
+        }
+
         const db = new sqlite3.Database(DB_PATH, (err) => {
             if (err) return reject(err);
             dbInstance = db;
