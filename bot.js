@@ -4979,3 +4979,12 @@ bot.on('message', async (msg) => {
 console.log('✅ Waifu Collection Bot started successfully!');
 console.log(`Owner ID: ${OWNER_ID}`);
 console.log('Waiting for messages...');
+if (process.env.PORT) {
+  const http = require("http");
+  http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("OK");
+  }).listen(process.env.PORT, () => {
+    console.log("🌐 Dummy HTTP server listening on", process.env.PORT);
+  });
+}
